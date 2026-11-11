@@ -56,12 +56,21 @@ def date_row(f, L, s):
     f.put("sm/mo%d.png" % (s["month"] - 1), *d["mo"])
 
 
-def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1):
+def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False):
+    """The face with sample data. bg: background image (or path under images/) instead
+    of the photo pool; flash: add the lightning layer."""
     f = Face(root, L)
-    f.put("bg/%s_%d.png" % (tod, pick % L["bgpool"][tod]), 0, 0)
+    if bg is None:
+        f.put("bg/%s_%d.png" % (tod, pick % L["bgpool"][tod]), 0, 0)
+    elif isinstance(bg, str):
+        f.put(bg, 0, 0)
+    else:
+        f.im.alpha_composite(bg.convert("RGBA"))
     # weather wash + one animation frame for the sample condition
     f.put(L["fx"]["wash"][s["cond"]], 0, 0)
-    f.put(L["fx"]["frames"][frame][s["cond"]], 0, 0)
+    f.put(L["fx"]["frames"][frame % len(L["fx"]["frames"])][s["cond"]], 0, 0)
+    if flash:
+        f.put(L["fx"]["flash"][s["cond"]], 0, 0)
 
     # compass ring rotated so N points north, fixed index mark at the top
     ring = Image.open(os.path.join(f.img, "bezel/ring.png")).convert("RGBA")
@@ -152,6 +161,57 @@ def finish(im):
     return out
 
 
+def render_sheet(root, L, path, info=None, cols=8, cell=233):
+    """Contact sheet: every photo of L["review"] under the face, numbered like the watch's
+    review mode, to choose and crop photos without installing. Shows your photos, so it
+    is written next to them (photos/ is not in git)."""
+    from PIL import ImageFont
+    rv = L["review"]
+    lab = 32
+    rows = (len(rv) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * (cell + 8) + 8, rows * (cell + lab + 8) + 8), (24, 26, 34))
+    d = ImageDraw.Draw(sheet)
+    f1, f2 = ImageFont.load_default(13), ImageFont.load_default(11)
+    for i, (bg, name) in enumerate(rv):
+        im = render(root, L, bg=bg, s=dict(SAMPLE, cond=3)).resize((cell, cell), Image.LANCZOS)
+        x, y = 8 + (i % cols) * (cell + 8), 8 + (i // cols) * (cell + lab + 8)
+        sheet.paste(im, (x, y + lab), im)
+        d.text((x, y + 1), "%d  %s" % (i + 1, name), font=f1, fill=(235, 235, 235))
+        meta = (info or {}).get(bg)
+        if meta:
+            d.text((x, y + 17), "brightness %.2f   exposure %+.1f EV" % (meta["mean"], meta["ev"]),
+                   font=f2, fill=(150, 150, 150))
+    sheet.save(path, quality=88)
+
+
+def render_weather_gif(root, L, path, tick, loops=2):
+    """Animated weather preview over the generated skylines (never over your photos, which
+    may not be published). Lightning flashes once, as on the watch (every few seconds)."""
+    import city
+    W = L["W"]
+    panels = [("night", 15), ("day", 8), ("dusk", 5)]       # thunderstorm, snow, light rain
+    bgs = {t: city.base(t, W, W, (W, W)) for t, _ in panels}
+    n = len(L["fx"]["frames"])
+    burst = (n + 2, n + 4)                                    # double flash in the second loop
+    cell = W // 2
+    frames = []
+    for k in range(n * loops):
+        im = Image.new("RGB", (len(panels) * (cell + 4) + 4, cell + 8), (24, 26, 34))
+        for i, (tod, code) in enumerate(panels):
+            face = render(root, L, frame=k % n, s=dict(SAMPLE, cond=code), bg=bgs[tod], flash=k in burst)
+            face = face.resize((cell, cell), Image.LANCZOS)
+            im.paste(face, (4 + i * (cell + 4), 4), face)
+        frames.append(im)
+    # one palette for all frames (from a plain and a lightning frame), no dithering: the
+    # parts that don't change compress far better
+    mosaic = Image.new("RGB", (frames[0].width, frames[0].height * 2))
+    mosaic.paste(frames[0], (0, 0))
+    mosaic.paste(frames[burst[0] % len(frames)], (0, frames[0].height))
+    pal = mosaic.quantize(256, method=Image.Quantize.MEDIANCUT)
+    q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+    q[0].save(path, save_all=True, append_images=q[1:], duration=tick, loop=0, optimize=True)
+
+
 def render_all(root, L):
     out = os.path.join(root, "preview")
     os.makedirs(out, exist_ok=True)
@@ -171,3 +231,4 @@ def render_all(root, L):
         im = render(root, L, tod, pick, dict(SAMPLE, cond=cond))
         sheet.alpha_composite(im, (10 + (i % 4) * (cell + 10), 10 + (i // 4) * (cell + 10)))
     sheet.save(os.path.join(out, "variants.png"))
+    render_weather_gif(root, L, os.path.join(out, "weather.gif"), L["fx"].get("tick", 120))

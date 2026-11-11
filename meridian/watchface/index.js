@@ -1,7 +1,8 @@
 // Meridian v9: city + data watch face for the Amazfit Active 3 Premium (466 x 466).
 //
-// Top: a city skyline that follows the time of day (dawn, day, dusk, night) with
-// a weather layer (clouds, rain, snow, fog) from today's forecast.
+// Background: a photo (or city skyline) that follows the time of day (dawn, day, dusk,
+// night), with full-screen weather on top (tint, looping rain/snow/dust animation and
+// lightning) that follows the watch's current weather, or today's forecast without it.
 // Edge: a compass bezel whose N marker points north.
 // Then weather + altitude, the date, HH:MM with seconds, ring gauges for steps and
 // HybridCharge, heart rate, sunrise and sunset, recovery time, sleep score, battery.
@@ -343,22 +344,35 @@ function secondsStop() {
   if (secTimer !== null) safe(() => clearInterval(secTimer))
   secTimer = null
 }
-// weather animation: cycles the frame layers while the screen is on
+// weather animation: cycles the frame layers while the screen is on and, every few
+// seconds, a double lightning flash (its image is transparent unless it's a thunderstorm)
 let fxTimer = null
-const fx = { frames: [], i: 0 }
+const fx = { frames: [], i: 0, flash: null, flashStep: 0, flashWait: 0 }
+const FLASH = [true, false, true, false] // one tick each: on, off, on, off
+const fxTicks = (ms) => Math.max(1, Math.round(ms / (L.fx.tick || 140)))
+function fxTick() {
+  const prev = fx.frames[fx.i]
+  fx.i = (fx.i + 1) % fx.frames.length
+  safe(() => show(fx.frames[fx.i], true))
+  safe(() => show(prev, false))
+  if (!fx.flash) return
+  if (fx.flashStep < FLASH.length) safe(() => show(fx.flash, FLASH[fx.flashStep++]))
+  else if (--fx.flashWait <= 0) {
+    fx.flashStep = 0
+    fx.flashWait = fxTicks(4000 + Math.random() * 7000)
+  }
+}
 function fxStart() {
   if (fxTimer !== null || fx.frames.length < 2) return
-  fxTimer = safe(() => setInterval(() => {
-    const prev = fx.frames[fx.i]
-    fx.i = (fx.i + 1) % fx.frames.length
-    safe(() => show(fx.frames[fx.i], true))
-    safe(() => show(prev, false))
-  }, 140))
+  fx.flashStep = FLASH.length
+  fx.flashWait = fxTicks(1500 + Math.random() * 3000)
+  fxTimer = safe(() => setInterval(fxTick, L.fx.tick || 140))
   if (fxTimer === undefined) fxTimer = null
 }
 function fxStop() {
   if (fxTimer !== null) safe(() => clearInterval(fxTimer))
   fxTimer = null
+  if (fx.flash) safe(() => show(fx.flash, false))
 }
 function wake() {
   readWeather()
@@ -476,22 +490,30 @@ WatchFace({
         const mk = (arr, h) => safe(() => ui.createWidget(W.IMG_LEVEL, lvl({ x: 0, y: 0, w: L.W, h: h, image_array: paths(arr), image_length: arr.length, type: t.id }, NORMAL)))
         const wash = mk(L.fx.wash, L.bg_h)
         const frames = L.fx.frames.map((arr) => mk(arr, L.fx_h))
+        const flash = mk(L.fx.flash, L.bg_h)
         fx.wash = wash
-        if (wash && frames.every((f) => f)) {
+        const made = [wash, flash].concat(frames)
+        if (made.every((w) => w)) {
           sys = true
           fx.frames = frames
+          fx.flash = flash
           frames.forEach((f, k) => k > 0 && show(f, false))
+          show(flash, false)
           sources.push('weatherfx=sys:' + t.name)
-        }
+        } else made.forEach((w) => w && safe(() => show(w, false)))
       }
       if (!sys) {
         const wash = makeImg(0, 0, img('fx/wash_none.png'), NORMAL)
         const frames = L.fx.frames.map(() => makeImg(0, 0, img('fx/none.png'), NORMAL))
+        const flash = makeImg(0, 0, img('fx/wash_none.png'), NORMAL)
         fx.frames = frames
+        fx.flash = flash
         frames.forEach((f, k) => k > 0 && show(f, false))
+        show(flash, false)
         draw.fx = () => {
           const code = st.forecast && st.forecast.index >= 0 && st.forecast.index <= 28 ? st.forecast.index : 3
           setSrc(wash, img(L.fx.wash[code]))
+          setSrc(flash, img(L.fx.flash[code]))
           frames.forEach((f, k) => setSrc(f, img(L.fx.frames[k][code])))
         }
         draw.fx()
@@ -817,9 +839,9 @@ WatchFace({
       tapApp('recovery', ['RECOVERY_TIME', 'RECOVERY', 'TRAINING_LOAD'], 'SYSTEM_APP_SPORT_STATUS')
       tapApp('sleep', ['SLEEP'], 'SYSTEM_APP_SLEEP')
       tapApp('vo2', ['VO2MAX', 'VO2_MAX'], 'SYSTEM_APP_SPORT_STATUS')
-      // The HRV data-type tap and the Readiness app both do nothing on this watch;
-      // the Heart Rate app is the closest one that opens.
-      tapApp('hrv', ['HEART'], 'SYSTEM_APP_HR')
+      // No system app id for an HRV screen: the HRV data-type tap and Readiness do
+      // nothing on this watch. Stress is the closest HRV-based screen that opens.
+      tapApp('hrv', null, 'SYSTEM_APP_PRESSURE')
     })
 
     // -- battery ------------------------------------------------------------------------------------

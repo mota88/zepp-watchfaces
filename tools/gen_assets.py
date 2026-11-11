@@ -21,7 +21,7 @@ import math
 import os
 import shutil
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 import city
 import fx
@@ -34,7 +34,18 @@ CX = W // 2
 PREVIEW = 314
 BG_H = 466                      # background photo covers the whole screen
 FADE = None                     # no fade to black (set e.g. (158, 246) for a top band)
-PHOTO_DIM = 0                  # 0..255: darkening over photos so the data stays readable
+PHOTO_DIM = 0                   # 0..255: darkening over every photo
+# Photos brighter than this behind the data (mean, 0..1) get a softer exposure, so white
+# text stays readable; dark photos are left alone. None = off.
+PHOTO_MAX_MEAN = 0.40
+PHOTO_CLARITY = 15              # local contrast ("clarity"), 0 = off
+PHOTO_SHARPEN = 80              # unsharp-mask strength after shrinking to 466 px, 0 = off
+PHOTO_SATURATION = 1.08         # 1.0 = unchanged
+PHOTO_VIGNETTE = 0.45           # 0..1: darkening at the screen edge, behind the compass ring
+# Photos are saved without transparency so the watch stores them as 16-bit colour
+# (RGB565, smooth gradients) instead of a 256-colour palette (blotchy). Costs about
+# 0.45 MB per photo on the watch instead of 0.22 MB.
+PHOTO_16BIT = True
 BEZEL_R = 216                   # compass bezel: radius of the marker centres
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,17 +53,19 @@ REPO = os.path.dirname(HERE)
 ROOT = os.path.join(REPO, "meridian")   # the watch face project (app.json, watchface/, assets/)
 FONT = os.path.join(HERE, "fonts", "barlow-condensed-latin-%d-normal.woff")
 PHOTOS = os.path.join(REPO, "photos")
+REVIEW_SHEET = os.path.join(PHOTOS, "review_sheet.jpg")   # not in git, like the photos
 TODS = ("dawn", "day", "dusk", "night")
 MOODS = ("clear", "clouds", "rain", "snow", "fog")
 # Background photos: photos/<dawn|day|dusk|night>/*.jpg. The face picks one from
-# the pool for the current time of day and changes it every hour. Crop per photo
-# (vertical focus 0..1, zoom) lives in photos/crops.json.
-PHOTO_CROP_DEFAULT = (0.5, 1.0)
+# the pool for the current time of day and changes it every hour. Crop per photo lives
+# in photos/crops.json (see photo_crop below).
+PHOTO_CROP_DEFAULT = {"x": 0.5, "y": 0.5, "zoom": 1.0, "ev": 0.0}
 # Used to work out sunrise/sunset when the watch gives no sun times (Madrid).
 HOME = {"lat": 40.4168, "lon": -3.7038}
-FX_H = 200                      # height of the weather animation band
-# Review mode: the face cycles through every photo (including photos/unused/),
-# one per minute, with its name shown, so you can pick which ones to keep.
+FX_H = H                        # height of the weather animation layer (from the top)
+# Review mode: the face shows every photo (including photos/unused/): tap the time for
+# the next one, with its name shown at the top, so you can pick which ones to keep.
+# A contact sheet of all of them is written to photos/review_sheet.jpg.
 # Set to False for the final version.
 REVIEW = True
 
@@ -209,8 +222,56 @@ def halo(im):
 def save(im, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if im.mode != "RGBA":
-        im = im.convert("RGBA")       # Zeus treats PNGs without alpha as JPEG
+        im = im.convert("RGBA")       # with alpha: 8-bit palette + alpha on the watch
     im.save(path, optimize=True)
+
+
+def vignette_mask(w, h, strength, start=0.72):
+    """Darkening (L mask) that starts at `start` of the radius and reaches `strength`
+    at the edge of the round screen: under the compass ring, not over the data."""
+    g = Image.radial_gradient("L").resize((w, h), Image.BICUBIC)   # 0 centre .. ~180 at the edge
+    lut = []
+    for v in range(256):
+        t = min(1.0, max(0.0, (v / 180.3 - start) / (1 - start)))
+        lut.append(int(round(255 * strength * t * t * (3 - 2 * t))))
+    return g.point(lut)
+
+
+def save_photo(im, path, grade=True):
+    """Opaque background: local contrast, sharpening, colour and vignette, saved without
+    alpha so the watch keeps it 16-bit. grade=False: vignette only (generated skylines)."""
+    rgb = im.convert("RGB")
+    if grade and PHOTO_CLARITY:
+        rgb = rgb.filter(ImageFilter.UnsharpMask(radius=18, percent=PHOTO_CLARITY, threshold=0))
+    if grade and PHOTO_SHARPEN:
+        rgb = rgb.filter(ImageFilter.UnsharpMask(radius=0.8, percent=PHOTO_SHARPEN, threshold=1))
+    if grade and PHOTO_SATURATION != 1.0:
+        rgb = ImageEnhance.Color(rgb).enhance(PHOTO_SATURATION)
+    if PHOTO_VIGNETTE:
+        rgb = Image.composite(Image.new("RGB", rgb.size, (0, 0, 0)), rgb, vignette_mask(*rgb.size, PHOTO_VIGNETTE))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # no alpha channel -> Zeus converts it to RGB565 instead of a 256-colour palette
+    (rgb if PHOTO_16BIT else rgb.convert("RGBA")).save(path, optimize=True)
+
+
+def photo_crop(v):
+    """A photos/crops.json entry -> {"x", "y", "zoom", "ev"}. Accepted forms:
+    [y, zoom] (vertical focus only), [x, y, zoom], or {"x": .., "y": .., "zoom": .., "ev": ..}
+    with any subset of keys. x, y: focus point, 0 = left/top .. 1 = right/bottom;
+    zoom >= 1; ev: exposure change in stops, on top of the automatic one."""
+    c = dict(PHOTO_CROP_DEFAULT)
+    if isinstance(v, dict):
+        c.update({k: float(v[k]) for k in c if k in v})
+    elif isinstance(v, (list, tuple)) and len(v) == 2:
+        c["y"], c["zoom"] = map(float, v)
+    elif isinstance(v, (list, tuple)) and len(v) >= 3:
+        c["x"], c["y"], c["zoom"] = map(float, v[:3])
+    return c
+
+
+def load_photo(path, crop):
+    return city.from_photo(path, W, BG_H, FADE, crop["x"], crop["y"], crop["zoom"], PHOTO_DIM,
+                           PHOTO_MAX_MEAN, crop["ev"])
 
 
 # ---------------------------------------------------------------- main ------
@@ -245,16 +306,22 @@ def main():
         crops = {k: v for k, v in json.load(open(cp)).items() if not k.startswith("_")}
     pool = {}
     review = []
+    photo_info = {}             # bg image -> {"mean", "ev"}: shown on the review sheet
+
+    def add_photo(src, key, out):
+        im, info = load_photo(src, photo_crop(crops.get(key)))
+        save_photo(im, rel(out))
+        photo_info[out] = info
+
     for t in TODS:
         folder = os.path.join(PHOTOS, t)
         files = sorted(f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".jpeg", ".png"))) if os.path.isdir(folder) else []
         if not files:
-            save(city.base(t, W, BG_H, FADE or (BG_H, BG_H)), rel("bg/%s_0.png" % t))
+            save_photo(city.base(t, W, BG_H, FADE or (BG_H, BG_H)), rel("bg/%s_0.png" % t), grade=False)
             pool[t] = 1
             continue
         for i, f in enumerate(files):
-            focus, zoom = crops.get(t + "/" + f, PHOTO_CROP_DEFAULT)
-            save(city.from_photo(os.path.join(folder, f), W, BG_H, FADE, focus, zoom, PHOTO_DIM), rel("bg/%s_%d.png" % (t, i)))
+            add_photo(os.path.join(folder, f), t + "/" + f, "bg/%s_%d.png" % (t, i))
             review.append(["bg/%s_%d.png" % (t, i), "%s/%s" % (t, f.rsplit(".", 1)[0])])
         pool[t] = len(files)
     if REVIEW:
@@ -265,29 +332,31 @@ def main():
             if relp.split(os.sep)[0] in TODS:
                 continue
             for f in names:
-                if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                p = os.path.join(dirpath, f)
+                if f.lower().endswith((".jpg", ".jpeg", ".png")) and p != REVIEW_SHEET:
                     extra.append(os.path.join(relp, f) if relp != "." else f)
         for i, rp in enumerate(sorted(extra)):
-            focus, zoom = crops.get(rp.replace(os.sep, "/"), PHOTO_CROP_DEFAULT)
-            save(city.from_photo(os.path.join(PHOTOS, rp), W, BG_H, FADE, focus, zoom, PHOTO_DIM), rel("bg/review_%d.png" % i))
+            add_photo(os.path.join(PHOTOS, rp), rp.replace(os.sep, "/"), "bg/review_%d.png" % i)
             review.append(["bg/review_%d.png" % i, rp.replace(os.sep, "/").rsplit(".", 1)[0]])
 
-    # -- weather: tint washes and looping animations, chosen by weather code ----------
-    fx_fade = (FX_H - 50, FX_H)
+    # -- weather: tints, looping animations and lightning, chosen by weather code -------
+    fx_fade = (FX_H - 50, FX_H) if FX_H < H else None
     # every image in one IMG_LEVEL array must have the same size, so "nothing" is a
     # transparent image as large as the layer it stands in for
     save(Image.new("RGBA", (W, BG_H), (0, 0, 0, 0)), rel("fx/wash_none.png"))
     save(Image.new("RGBA", (W, FX_H), (0, 0, 0, 0)), rel("fx/none.png"))
     for k in fx.WASHES:
-        save(fx.wash(k, W, BG_H, FADE or (BG_H, BG_H + 1)), rel("fx/wash_%s.png" % k))
+        save(fx.wash(k, W, BG_H, FADE), rel("fx/wash_%s.png" % k))
+    save(fx.flash(W, BG_H), rel("fx/flash.png"))
     for k in fx.ANIMS:
         for n, im in enumerate(fx.anim_frames(k, W, FX_H, fx_fade)):
             save(im, rel("fx/%s_%d.png" % (k, n)))
-    fx_wash = []
+    fx_wash, fx_flash = [], []
     fx_frames = [[] for _ in range(fx.FRAMES)]
     for code in range(29):
         wsh, an = fx.WEATHER_FX[code]
         fx_wash.append("fx/wash_%s.png" % wsh if wsh else "fx/wash_none.png")
+        fx_flash.append("fx/flash.png" if code in fx.FLASH_CODES else "fx/wash_none.png")
         for n in range(fx.FRAMES):
             fx_frames[n].append("fx/%s_%d.png" % (an, n) if an else "fx/none.png")
 
@@ -356,7 +425,7 @@ def main():
     g = {n: s.meta() for n, s in sets.items()}
     L = {"W": W, "bg_h": BG_H, "fx_h": FX_H, "g": g, "bgpool": pool, "home": HOME,
          "review": review if REVIEW and review else None,   # no photos (fresh clone): normal mode
-         "fx": {"wash": fx_wash, "frames": fx_frames}}
+         "fx": {"wash": fx_wash, "frames": fx_frames, "flash": fx_flash, "tick": fx.TICK_MS}}
 
     def row(cy, set_name):
         return int(round(cy - g[set_name]["vc"]))
@@ -487,6 +556,9 @@ def main():
 
     import preview
     preview.render_all(ROOT, L)
+    if L["review"]:
+        preview.render_sheet(ROOT, L, REVIEW_SHEET, photo_info)
+        print("review sheet: %s" % os.path.relpath(REVIEW_SHEET, REPO))
     print("assets, layout.js and previews written")
 
 

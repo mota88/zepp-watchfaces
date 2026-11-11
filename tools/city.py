@@ -1,14 +1,16 @@
-"""Procedural city skylines for Meridian's top band (dawn, day, dusk, night).
+"""Procedural city skylines for Meridian's top band (dawn, day, dusk, night), and photo crops.
 
 Generated, so there are no photos to license. To use your own photos instead,
 put them in photos/<dawn|day|dusk|night>/ (see gen_assets.py).
 """
+import math
 import random
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageStat
 
 from landscape import PALETTES, fade_to_black, lerp
 
 SS = 2
+GAMMA = 2.2         # photos are resized in linear light (gamma-decoded), then re-encoded
 
 CITY = {
     # far / mid / near building colours, window colour, share of lit windows, beacons
@@ -101,15 +103,52 @@ def base(name, w, h, fade):
     return fade_to_black(im, fade[0], fade[1])
 
 
-def from_photo(path, w, h, fade, focus=0.5, zoom=1.0, dim=70):
-    """Cover-crop a photo to the band around a vertical focus point (0 = top, 1 = bottom),
-    dim it a little for legibility and fade it to black."""
-    im = Image.open(path).convert("RGBA")
-    scale = max(w / im.width, h / im.height) * zoom
-    im = im.resize((int(im.width * scale + 0.5), int(im.height * scale + 0.5)), Image.LANCZOS)
-    x0 = (im.width - w) // 2
-    y0 = int(round(focus * im.height - h / 2))
-    y0 = max(0, min(im.height - h, y0))
-    im = im.crop((x0, y0, x0 + w, y0 + h))
-    im.alpha_composite(Image.new("RGBA", (w, h), (0, 0, 0, dim)))
-    return fade_to_black(im, fade[0], fade[1]) if fade else im
+def _linear(ch):
+    return ImageMath.lambda_eval(lambda a: (a["float"](a["c"]) / 255.0) ** GAMMA, c=ch)
+
+
+def _encode(lin, k=1.0):
+    return ImageMath.lambda_eval(
+        lambda a: a["convert"](a["max"](a["min"](a["f"] * k, 1.0), 0.0) ** (1 / GAMMA) * 255.0 + 0.5, "L"), f=lin)
+
+
+def data_mean(im):
+    """Mean brightness (0..1) of the area behind the data: the disc inside the bezel."""
+    w, h = im.size
+    m = Image.new("L", (w, h), 0)
+    r = 0.43 * w
+    ImageDraw.Draw(m).ellipse([w / 2 - r, h / 2 - r, w / 2 + r, h / 2 + r], fill=255)
+    return ImageStat.Stat(im.convert("L"), m).mean[0] / 255
+
+
+def from_photo(path, w, h, fade=None, x=0.5, y=0.5, zoom=1.0, dim=0, max_mean=None, ev=0.0):
+    """Cover-crop a photo around a focus point (x, y: 0 = left/top .. 1 = right/bottom)
+    with `zoom` (>= 1). Resizing happens in linear light, so small lights and stars keep
+    their brightness. Photos brighter than `max_mean` behind the data (see data_mean) are
+    darkened softly (exposure in linear light, colours kept) so white text stays readable;
+    `ev` adds a manual exposure change in stops. Returns (RGB image, info)."""
+    im = Image.open(path)
+    scale = max(w / im.width, h / im.height) * max(1.0, zoom)
+    # JPEG: decode at a reduced size that still keeps 2x the pixels needed (much faster)
+    im.draft("RGB", (int(im.width * scale * 2) + 1, int(im.height * scale * 2) + 1))
+    im = im.convert("RGB")
+    scale = max(w / im.width, h / im.height) * max(1.0, zoom)
+    sw, sh = im.width * scale, im.height * scale
+    x0 = max(0.0, min(x * sw - w / 2, sw - w))
+    y0 = max(0.0, min(y * sh - h / 2, sh - h))
+    box = (x0 / scale, y0 / scale, min(im.width, (x0 + w) / scale), min(im.height, (y0 + h) / scale))
+    lin = [_linear(c).resize((w, h), Image.LANCZOS, box=box) for c in im.split()]
+    out = Image.merge("RGB", [_encode(c) for c in lin])
+    mean = data_mean(out)
+    k = 2.0 ** ev
+    if max_mean and mean > max_mean:
+        # keep a third of the excess, so bright photos still look brighter than dark ones
+        target = max_mean + (mean - max_mean) / 3
+        k *= max(0.35, (target / mean) ** GAMMA)
+    if k != 1.0:
+        out = Image.merge("RGB", [_encode(c, k) for c in lin])
+    if dim:
+        out = Image.composite(Image.new("RGB", (w, h), (0, 0, 0)), out, Image.new("L", (w, h), dim))
+    if fade:
+        out = fade_to_black(out.convert("RGBA"), fade[0], fade[1]).convert("RGB")
+    return out, {"mean": mean, "ev": math.log2(k)}
