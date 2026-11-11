@@ -7,10 +7,9 @@ dist/
 */assets/default.r/images/
 
 # Source photos: not redistributed (licences) and too large for git history.
-# Only the crops and the list of where each photo came from are tracked.
+# Only the crops are tracked.
 /photos/*
 !/photos/crops.json
-!/photos/sources.json
 
 # Python
 __pycache__/

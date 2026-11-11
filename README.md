@@ -5,7 +5,7 @@ Zepp OS watch faces for the Amazfit Active 3 Premium (466 x 466).
 ```
 meridian/    Meridian watch face (Zeus project: app.json, watchface/, assets/)
 tools/       shared generator, weather effects, icons, preview renderer, fonts
-photos/      background photos (not in git), crops.json, sources.json
+photos/      background photos (not in git) and crops.json
 ```
 
 Run the tools from the repository root, and `zeus` from the face's folder (`meridian/`).
@@ -14,7 +14,7 @@ Not in git (see `.gitignore`):
 
 - `meridian/assets/default.r/images/`: generated. After cloning, run `python3 tools/gen_assets.py`
   (needs `pip install pillow`) before building the face.
-- `photos/`: only `crops.json` and `sources.json` are tracked (see
+- `photos/`: only `crops.json` is tracked (see
   [Background photos and weather](#background-photos-and-weather)).
 - `dist/`, `*.zab`, `*.zpk`: `zeus build` output.
 
@@ -62,7 +62,6 @@ tools/icons.py                    icons
 tools/preview.py                  preview renderer (mirrors index.js)
 tools/fonts/                      Barlow Condensed (SIL Open Font License, licence included)
 photos/crops.json                 crop per photo
-photos/sources.json               where each photo came from
 ```
 
 ### Restyle
@@ -83,9 +82,8 @@ Dawn/day/dusk/night come from sunrise and sunset (from the watch, or calculated 
 `tools/gen_assets.py` when the watch gives none).
 
 The photos are not in git: they are large, and even free-licence sites (e.g. Unsplash) don't
-allow redistributing them as a collection. `photos/sources.json` records where each one came
-from (page, author, licence and, when known, the original download link): add an entry for
-every new photo. Without photos, the generator uses the generated city skylines.
+allow redistributing them as a collection. Without photos, the generator uses the generated
+city skylines.
 
 Review mode (`REVIEW` in `tools/gen_assets.py`) adds the photos from any other folder
 (e.g. `photos/review/`, `photos/unused/`): tap the time to step through them, with each
