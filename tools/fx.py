@@ -1,14 +1,16 @@
-"""Weather effects (tints, looping animations, lightning) and the compass ring.
+"""Weather effects (tints, looping animations, lightning, shooting stars) and the compass ring.
 
 Animations are full-screen frames that the face cycles while the screen is on. Every
-frame draws the same particles at a later moment, and each particle either moves a
-whole number of tile periods per loop (rain, sleet, dust) or fades in and out within
-the loop (snow), so the loop restarts without a visible jump. Particles are drawn at
-3x and scaled down, so streaks and flakes are smooth.
+frame draws the same scene at a later moment, and the loop restarts without a visible
+jump: particles move a whole number of tile periods per loop (rain, sleet, dust) or fade
+in and out within it (snow, stars), slow drifts (clouds, fog) cross-fade between two
+copies half a loop apart (each copy jumps back while it is invisible), and sun rays sway
+back and forth. Particles are drawn at 3x and scaled down, so they are smooth, and fade
+behind the central text (FOCUS) so the data stays readable.
 """
 import math
 import random
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 FRAMES = 8              # frames per loop (each costs ~0.22 MB per animation on the watch)
 TICK_MS = 120           # time per frame; one loop lasts FRAMES * TICK_MS
@@ -16,17 +18,19 @@ SS = 3                  # supersampling for particles
 
 # Zepp weather codes (0..28) -> (wash, animation). None = nothing.
 WEATHER_FX = {
-    0: ("cloudy", None), 1: ("rain", "rain_light"), 2: ("snow", "snow_light"), 3: (None, None),
-    4: ("overcast", None), 5: ("rain", "rain_light"), 6: ("snow", "snow_light"), 7: ("rain", "rain_heavy"),
+    0: ("cloudy", "clouds"), 1: ("rain", "rain_light"), 2: ("snow", "snow_light"), 3: (None, "sun"),
+    4: ("overcast", "clouds"), 5: ("rain", "rain_light"), 6: ("snow", "snow_light"), 7: ("rain", "rain_heavy"),
     8: ("snow", "snow_heavy"), 9: ("snow", "snow_heavy"), 10: ("rain", "rain_heavy"), 11: ("dust", "dust"),
-    12: ("rain", "sleet"), 13: ("fog", None), 14: ("haze", None), 15: ("storm", "rain_heavy"),
+    12: ("rain", "sleet"), 13: ("fog", "fog"), 14: ("haze", "fog"), 15: ("storm", "rain_heavy"),
     16: ("snow", "snow_heavy"), 17: ("dust", "dust"), 18: ("storm", "rain_heavy"), 19: ("rain", "sleet"),
     20: ("storm", "rain_heavy"), 21: ("storm", "rain_heavy"), 22: ("dust", "dust"), 23: ("dust", "dust"),
-    24: ("rain", "rain_heavy"), 25: (None, None), 26: ("cloudy", None), 27: ("rain", "rain_light"),
-    28: (None, None),
+    24: ("rain", "rain_heavy"), 25: (None, None), 26: ("cloudy", "clouds"), 27: ("rain", "rain_light"),
+    28: (None, "stars"),
 }
-# Thunderstorm codes (their icon shows a bolt): the face adds an occasional lightning flash.
+# Every few seconds the face shows two "flash" images, one tick each: lightning (bright,
+# then fading) in thunderstorms (their icon shows a bolt), a shooting star on clear nights.
 FLASH_CODES = (15, 20)
+METEOR_CODES = (28,)
 # Tints over the photo: colour, mean alpha (0 = no tint; kept light so the photo stays
 # clear) and how it spreads from top to bottom ("sky": heavier at the top, like a
 # clouded sky; "low": heavier at the bottom, like fog lying in a valley).
@@ -38,10 +42,29 @@ WASHES = {
 }
 PROFILES = {"sky": (1.5, 0.5), "even": (1.15, 0.85), "low": (0.6, 1.4)}  # alpha factor at top, bottom
 TEXTURED = ("fog", "dust")          # washes with drifting-cloud texture instead of a flat tint
-ANIMS = ("rain_light", "rain_heavy", "sleet", "snow_light", "snow_heavy", "dust")
+ANIMS = ("rain_light", "rain_heavy", "sleet", "snow_light", "snow_heavy", "dust", "clouds", "fog", "sun", "stars")
+# Animations that need fewer distinct frames than FRAMES (saves space on the watch):
+# "half" repeats after half a loop (drifts, star twinkle), "swing" plays forward then back.
+REPEAT = {"clouds": "half", "fog": "half", "stars": "half", "sun": "swing"}
+# Particles fade behind the central text: ellipse centre x, y, radii (px at 466) and the
+# strength left at its middle, per animation (1 = no fade).
+FOCUS = (233, 248, 175, 150)
+FOCUS_KEEP = {"clouds": 0.6, "fog": 0.7, "sun": 0.55}
+FOCUS_KEEP_DEFAULT = 0.35
 
 RAIN = (205, 218, 236)
 WIND = math.tan(math.radians(9))    # rain slant: horizontal px per px of fall
+
+
+def order(kind, frames=None):
+    """Distinct frame shown in each of the face's frame slots."""
+    frames = frames or FRAMES
+    mode = REPEAT.get(kind)
+    if mode == "half":
+        return [k % (frames // 2) for k in range(frames)]
+    if mode == "swing":
+        return [k if k <= frames // 2 else frames - k for k in range(frames)]
+    return list(range(frames))
 
 
 def _bottom_fade(im, fade):
@@ -95,7 +118,7 @@ def wash(kind, w, h, fade=None):
     return _bottom_fade(im, fade) if fade else im
 
 
-def flash(w, h):
+def flash(w, h, strength=1.0):
     """Lightning: the sky lights up from above (shown for a moment by the face)."""
     cx, cy, rad = w * 0.62, -h * 0.25, h * 1.5
     m = Image.new("L", (w // 2, h // 2), 0)
@@ -103,10 +126,58 @@ def flash(w, h):
     for y in range(h // 2):
         for x in range(w // 2):
             d = math.hypot(2 * x - cx, 2 * y - cy) / rad
-            px[x, y] = int(140 * max(0.0, 1 - d) ** 1.6)
+            px[x, y] = int(140 * strength * max(0.0, 1 - d) ** 1.6)
     im = Image.new("RGBA", (w, h), (226, 232, 255, 0))
     im.putalpha(m.resize((w, h), Image.BICUBIC))
     return im
+
+
+def meteor(w, h, part):
+    """Shooting star in the upper-left sky, in two steps (part 0, then 1) shown one tick each."""
+    x0, y0, x1, y1 = w * 0.44, h * 0.07, w * 0.13, h * 0.29         # path start and end
+    head, tail, peak = ((0.42, 0.20, 200), (0.80, 0.38, 255))[part]  # along the path, tail length, brightness
+    hx, hy = x0 + (x1 - x0) * head, y0 + (y1 - y0) * head
+    tx, ty = hx - (x1 - x0) * tail, hy - (y1 - y0) * tail
+    m = Image.new("L", (w * SS, h * SS), 0)
+    d = ImageDraw.Draw(m)
+    n = 24
+    for i in range(n):                          # tail fades towards its end
+        a, b = i / n, (i + 1) / n
+        d.line([((tx + (hx - tx) * a) * SS, (ty + (hy - ty) * a) * SS),
+                ((tx + (hx - tx) * b) * SS, (ty + (hy - ty) * b) * SS)],
+               fill=int(peak * b ** 1.8), width=int((0.8 + 1.0 * b) * SS))
+    r = 1.6 * SS
+    d.ellipse([hx * SS - r, hy * SS - r, hx * SS + r, hy * SS + r], fill=peak)
+    m = m.resize((w, h), Image.BOX)
+    glow = m.filter(ImageFilter.GaussianBlur(3)).point(lambda v: min(255, v * 2))
+    im = Image.new("RGBA", (w, h), (232, 240, 255, 0))
+    im.putalpha(ImageChops.lighter(m, glow.point(lambda v: v // 2)))
+    return im
+
+
+def _focus_mask(w, h, keep):
+    """Alpha multiplier: `keep` behind the central text, rising to 1 towards the edges."""
+    cx, cy, rx, ry = FOCUS
+    s = w / 466.0
+    m = Image.new("L", (w // 2, h // 2))
+    px = m.load()
+    for y in range(h // 2):
+        for x in range(w // 2):
+            d = math.hypot((2 * x - cx * s) / (rx * s), (2 * y - cy * s) / (ry * s))
+            t = min(1.0, max(0.0, (d - 0.55) / 0.45))
+            px[x, y] = int(255 * (keep + (1 - keep) * t * t * (3 - 2 * t)))
+    return m.resize((w, h), Image.BICUBIC)
+
+
+def _with_focus(frames, kind):
+    keep = FOCUS_KEEP.get(kind, FOCUS_KEEP_DEFAULT)
+    if keep >= 1:
+        return frames
+    w, h = frames[0].size
+    mask = _focus_mask(w, h, keep)
+    for f in frames:
+        f.putalpha(ImageChops.multiply(f.getchannel("A"), mask))
+    return frames
 
 
 # ---------------------------------------------------------------- particles --
@@ -231,42 +302,150 @@ def _dust_frames(rng, w, h, frames, fade):
     return [_render(layers, w, h, k, place, fade) for k in range(frames)]
 
 
+def _ramp(w, h, top_full, bottom_zero):
+    """Vertical alpha profile: 255 above `top_full`, fading to 0 at `bottom_zero` (fractions
+    of h). Swap the two to fade the other way."""
+    r = Image.new("L", (1, h))
+    for y in range(h):
+        t = (y / h - top_full) / (bottom_zero - top_full)
+        t = min(1.0, max(0.0, t))
+        r.putpixel((0, y), int(255 * (1 - t * t * (3 - 2 * t))))
+    return r.resize((w, h))
+
+
+def _drift_frames(rng, w, h, color, travel, density, ramp, stretch, frames, fade):
+    """A soft texture drifting sideways by `travel` px per loop (negative: to the left).
+    Two copies half a loop apart cross-fade, each jumping back while it is invisible, so
+    the drift never visibly restarts; the result repeats after half a loop."""
+    lo, hi, peak = density
+    n = _fractal(rng, w, max(16, int(h / stretch))).resize((w, h), Image.BICUBIC)
+
+    def curve(v):
+        t = min(1.0, max(0.0, (v / 255 - lo) / (hi - lo)))
+        return int(peak * t * t * (3 - 2 * t))
+    tex = ImageChops.multiply(n.point(curve), _ramp(w, h, *ramp)).filter(ImageFilter.GaussianBlur(2))
+    out = []
+    for k in range(frames // 2):
+        t = k / frames
+        a = ImageChops.offset(tex, int(round(travel * t)), 0)
+        b = ImageChops.offset(tex, int(round(travel * (t + 0.5))), 0)
+        im = Image.new("RGBA", (w, h), color + (0,))
+        im.putalpha(Image.blend(b, a, 2 * t))          # copy a fades in as b fades out
+        out.append(_bottom_fade(im, fade) if fade else im)
+    return out
+
+
+def _stars_frames(rng, w, h, frames, fade):
+    """Clear night: small stars in the upper sky, most of them twinkling (repeats every
+    half loop)."""
+    half = frames // 2
+    stars = []
+    for _ in range(70):
+        stars.append((rng.uniform(0, w), h * 0.55 * rng.random() ** 1.2, rng.choice((0.55, 0.7, 0.85, 1.0, 1.3)),
+                      rng.uniform(90, 235), rng.random() < 0.65, rng.random()))
+    out = []
+    for k in range(half):
+        m = Image.new("L", (w * SS, h * SS), 0)
+        d = ImageDraw.Draw(m)
+        for x, y, r, a, twinkle, ph in stars:
+            v = a * (0.3 + 0.7 * (0.5 + 0.5 * math.cos(2 * math.pi * (k / half + ph)))) if twinkle else a
+            rr = r * SS
+            d.ellipse([x * SS - rr, y * SS - rr, x * SS + rr, y * SS + rr], fill=int(v))
+        m = m.resize((w, h), Image.BOX)
+        glow = m.filter(ImageFilter.GaussianBlur(1.6)).point(lambda v: min(255, v * 2))
+        im = Image.new("RGBA", (w, h), (236, 242, 255, 0))
+        im.putalpha(ImageChops.lighter(m, glow))
+        out.append(_bottom_fade(im, fade) if fade else im)
+    return out
+
+
+def _sun_frames(rng, w, h, frames, fade):
+    """Clear day: soft light rays from beyond the top-right edge that sway a little and
+    breathe; played forward then back (frames // 2 + 1 distinct frames)."""
+    half = frames // 2
+    sx, sy = w * 0.86, -h * 0.10                       # the sun, just off screen
+    rays = [(rng.uniform(98, 146), rng.uniform(1.2, 2.8), rng.uniform(0.55, 1.0), rng.random()) for _ in range(9)]
+    hw, hh = w // 2, h // 2                            # rays are soft: draw at half size
+    fall = Image.new("L", (hw, hh))                    # rays fade with distance from the sun
+    px = fall.load()
+    for y in range(hh):
+        for x in range(hw):
+            d = math.hypot(2 * x - sx, 2 * y - sy) / (1.25 * h)
+            px[x, y] = int(255 * max(0.0, 1 - d) ** 1.4)
+    glow = Image.new("L", (hw, hh), 0)
+    gd = ImageDraw.Draw(glow)
+    for i in range(30, 0, -1):
+        rr = 0.42 * h / 2 * i / 30
+        gd.ellipse([sx / 2 - rr, sy / 2 - rr, sx / 2 + rr, sy / 2 + rr], fill=int(120 * (1 - i / 30) ** 1.5))
+    out = []
+    for j in range(half + 1):
+        s = j / half                                   # 0 .. 1 over the forward half of the swing
+        sway = 2.0 * (1 - math.cos(math.pi * s)) / 2
+        m = Image.new("L", (hw, hh), 0)
+        d = ImageDraw.Draw(m)
+        for ang, width, power, ph in rays:
+            v = 105 * power * (0.72 + 0.28 * math.cos(math.pi * s + 2 * math.pi * ph))
+            pts = [(sx / 2, sy / 2)]
+            for side in (-1, 1):
+                a = math.radians(ang + sway + side * width)
+                pts.append((sx / 2 + math.cos(a) * h, sy / 2 + math.sin(a) * h))
+            d.polygon(pts, fill=int(v))
+        m = ImageChops.multiply(m.filter(ImageFilter.GaussianBlur(5)), fall)
+        m = ImageChops.lighter(m, glow.filter(ImageFilter.GaussianBlur(6)))
+        im = Image.new("RGBA", (w, h), (255, 238, 200, 0))
+        im.putalpha(m.resize((w, h), Image.BICUBIC))
+        out.append(_bottom_fade(im, fade) if fade else im)
+    return out
+
+
 def anim_frames(kind, w, h, fade=None, frames=None):
-    """`frames` images (FRAMES by default) that loop seamlessly."""
+    """The distinct frames of an animation; order(kind) says which one each frame slot
+    shows (FRAMES slots by default)."""
     frames = frames or FRAMES
     rng = random.Random(sum(map(ord, kind)))
     if kind == "rain_light":
-        return _fall(w, h, _rain(rng, w, h, [(110, (9, 14), (45, 80), 1.0, 1),
-                                             (40, (18, 26), (80, 120), 1.2, 1),
-                                             (10, (34, 48), (95, 135), 1.5, 2)]), frames, fade)
-    if kind == "rain_heavy":
-        return _fall(w, h, _rain(rng, w, h, [(240, (10, 16), (45, 85), 1.0, 1),
-                                             (110, (20, 30), (75, 120), 1.2, 1),
-                                             (34, (40, 60), (100, 150), 1.6, 2)]), frames, fade)
-    if kind == "sleet":
+        out = _fall(w, h, _rain(rng, w, h, [(110, (9, 14), (45, 80), 1.0, 1),
+                                            (40, (18, 26), (80, 120), 1.2, 1),
+                                            (10, (34, 48), (95, 135), 1.5, 2)]), frames, fade)
+    elif kind == "rain_heavy":
+        out = _fall(w, h, _rain(rng, w, h, [(240, (10, 16), (45, 85), 1.0, 1),
+                                            (110, (20, 30), (75, 120), 1.2, 1),
+                                            (34, (40, 60), (100, 150), 1.6, 2)]), frames, fade)
+    elif kind == "sleet":
         layers = _rain(rng, w, h, [(90, (9, 14), (45, 80), 1.0, 1), (30, (18, 26), (80, 120), 1.2, 1)])
         ice = _Layer((246, 250, 255), halo=0.3)
         for _ in range(70):     # ice pellets: short bright dashes, falling with the rain
             ice.items.append((rng.uniform(0, w), rng.uniform(0, h), rng.uniform(3, 6), rng.uniform(170, 245),
                               max(1, int(round(2.2 * SS))), 1))
-        return _fall(w, h, layers + [ice], frames, fade)
-    if kind == "snow_light":
-        return _snow_frames(rng, w, h, [(90, (0.7, 1.2), (120, 200), 26, 0),
-                                        (45, (1.4, 2.2), (170, 235), 46, 0),
-                                        (10, (2.6, 3.6), (130, 200), 80, 1.1)], frames, fade)
-    if kind == "snow_heavy":
-        return _snow_frames(rng, w, h, [(280, (0.7, 1.3), (120, 200), 32, 0),
-                                        (130, (1.5, 2.4), (170, 240), 56, 0),
-                                        (32, (2.8, 4.0), (130, 210), 96, 1.1)], frames, fade)
-    if kind == "dust":
-        return _dust_frames(rng, w, h, frames, fade)
-    raise ValueError("unknown animation " + kind)
+        out = _fall(w, h, layers + [ice], frames, fade)
+    elif kind == "snow_light":
+        out = _snow_frames(rng, w, h, [(90, (0.7, 1.2), (120, 200), 26, 0),
+                                       (45, (1.4, 2.2), (170, 235), 46, 0),
+                                       (10, (2.6, 3.6), (130, 200), 80, 1.1)], frames, fade)
+    elif kind == "snow_heavy":
+        out = _snow_frames(rng, w, h, [(280, (0.7, 1.3), (120, 200), 32, 0),
+                                       (130, (1.5, 2.4), (170, 240), 56, 0),
+                                       (32, (2.8, 4.0), (130, 210), 96, 1.1)], frames, fade)
+    elif kind == "dust":
+        out = _dust_frames(rng, w, h, frames, fade)
+    elif kind == "clouds":          # a grey veil of cloud drifting right across the upper sky
+        out = _drift_frames(rng, w, h, (150, 156, 168), 16, (0.28, 0.72, 120), (0.25, 0.70), 1.6, frames, fade)
+    elif kind == "fog":             # banks of fog drifting left along the bottom
+        out = _drift_frames(rng, w, h, (214, 218, 226), -16, (0.30, 0.85, 120), (0.78, 0.40), 2.6, frames, fade)
+    elif kind == "sun":
+        out = _sun_frames(rng, w, h, frames, fade)
+    elif kind == "stars":
+        out = _stars_frames(rng, w, h, frames, fade)
+    else:
+        raise ValueError("unknown animation " + kind)
+    return _with_focus(out, kind)
 
 
 # ---------------------------------------------------------------- compass ring --
-def compass_ring(size, font_path, north=(255, 80, 70), fg=(235, 235, 235), dim=(140, 140, 140)):
-    """Full-screen ring: ticks every 5 degrees, numbers every 30, N/E/S/W letters.
-    The watch rotates this image so N points north."""
+def compass_ring(size, north=(255, 80, 70), fg=(235, 235, 235), dim=(140, 140, 140)):
+    """Full-screen ring of ticks: every 5 degrees, longer every 30, red at north.
+    The watch rotates this image; the N/E/S/W letters are separate images that the face
+    keeps upright while moving them around the edge."""
     S = 3
     W = size * S
     c = W / 2
@@ -279,29 +458,11 @@ def compass_ring(size, font_path, north=(255, 80, 70), fg=(235, 235, 235), dim=(
     for deg in range(0, 360, 5):
         a = math.radians(deg - 90)
         major = deg % 30 == 0
-        ln = (11 if major else 6) * S
+        ln = (13 if deg == 0 else 11 if major else 6) * S
         col = (north if deg == 0 else fg if major else dim) + (255,)
         d.line([c + r_out * math.cos(a), c + r_out * math.sin(a),
                 c + (r_out - ln) * math.cos(a), c + (r_out - ln) * math.sin(a)],
-               fill=col, width=int((2.4 if major else 1.4) * S))
-    labels = {0: ("N", 30, north), 90: ("E", 26, fg), 180: ("S", 26, fg), 270: ("W", 26, fg)}
-    for deg in range(0, 360, 30):
-        if deg in labels:
-            text, fs, col = labels[deg]
-            weight = 700
-        else:
-            text, fs, col = str(deg), 15, dim
-            weight = 600
-        f = ImageFont.truetype(font_path % weight, int(fs * S))
-        tile = Image.new("RGBA", (int(fs * 2.6 * S), int(fs * 1.6 * S)), col + (0,))
-        m = Image.new("L", tile.size, 0)
-        ImageDraw.Draw(m).text((tile.width / 2, tile.height / 2), text, font=f, fill=255, anchor="mm")
-        tile.putalpha(m)
-        tile = tile.rotate(-deg, resample=Image.BICUBIC, expand=True)
-        rr = (size / 2 - (30 if deg in labels else 27)) * S
-        a = math.radians(deg - 90)
-        x, y = c + rr * math.cos(a), c + rr * math.sin(a)
-        im.alpha_composite(tile, (int(x - tile.width / 2), int(y - tile.height / 2)))
+               fill=col, width=int((3.0 if deg == 0 else 2.4 if major else 1.4) * S))
     return im.resize((size, size), Image.LANCZOS)
 
 

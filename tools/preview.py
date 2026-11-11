@@ -39,16 +39,17 @@ class Face:
         self.run(set_name, text, spec["box"], units=units)
 
     def arc(self, cx, cy, r, w, a0, a1, color):
+        # like the watch's ARC: the stroke stays inside the box of radius r
         d = ImageDraw.Draw(self.im)
-        d.arc([cx - r - w / 2, cy - r - w / 2, cx + r + w / 2, cy + r + w / 2], min(a0, a1), max(a0, a1), fill=color, width=w)
+        d.arc([cx - r, cy - r, cx + r, cy + r], min(a0, a1), max(a0, a1), fill=color, width=w)
 
 
 def hexrgb(v):
     return ((v >> 16) & 255, (v >> 8) & 255, v & 255)
 
 
-def date_row(f, L, s):
-    d = L["date"]
+def date_row(f, L, s, key="date"):
+    d = L[key]
     f.put("sm/wk%d.png" % (s["wd"] - 1), *d["wk"])
     dd = "%02d" % s["day"]
     f.put("sm/%s.png" % dd[0], *d["dd"])
@@ -56,12 +57,14 @@ def date_row(f, L, s):
     f.put("sm/mo%d.png" % (s["month"] - 1), *d["mo"])
 
 
-def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False):
+def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=0):
     """The face with sample data. bg: background image (or path under images/) instead
-    of the photo pool; flash: add the lightning layer."""
+    of the photo pool; flash: 1 or 2 adds that step of the flash (lightning, shooting star)."""
     f = Face(root, L)
     if bg is None:
-        f.put("bg/%s_%d.png" % (tod, pick % L["bgpool"][tod]), 0, 0)
+        p = L["bgpool"][tod]
+        mood = "any" if "any" in p else sorted(p)[0]
+        f.put("bg/%s_%s_%d.png" % (tod, mood, pick % p[mood]), 0, 0)
     elif isinstance(bg, str):
         f.put(bg, 0, 0)
     else:
@@ -70,13 +73,19 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False)
     f.put(L["fx"]["wash"][s["cond"]], 0, 0)
     f.put(L["fx"]["frames"][frame % len(L["fx"]["frames"])][s["cond"]], 0, 0)
     if flash:
-        f.put(L["fx"]["flash"][s["cond"]], 0, 0)
+        f.put(L["fx"]["flash"][flash - 1][s["cond"]], 0, 0)
 
-    # compass ring rotated so N points north, fixed index mark at the top
+    # compass: ring of ticks rotated so N points north, upright letters around it,
+    # fixed index mark at the top
+    W = L["W"]
     ring = Image.open(os.path.join(f.img, "bezel/ring.png")).convert("RGBA")
     ring = ring.rotate(s["heading"], resample=Image.BICUBIC)
     f.im.alpha_composite(ring)
-    f.put("bezel/lubber.png", L["W"] / 2 - 8, 0)
+    b = L["bezel"]
+    for i, (k, size) in enumerate(b["letters"]):
+        a = math.radians(i * 90 - s["heading"])
+        f.put("bezel/%s.png" % k, W / 2 + b["r"] * math.sin(a) - size / 2, W / 2 - b["r"] * math.cos(a) - size / 2)
+    f.put("bezel/lubber.png", W / 2 - 8, 0)
 
     w = L["weather"]
     f.item(w["cond"], "weather/%d" % s["cond"], s["temp"])
@@ -85,8 +94,10 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False)
     f.item(w["alt"], "alt", s["alt"], ["u_m"])
 
     date_row(f, L, s)
-    f.item(L["sun"]["rise"], "sunrise", s["rise"], set_name="xs")
-    f.item(L["sun"]["set"], "sunset", s["set"], set_name="xs")
+    # next sun event: sunset during the day, sunrise otherwise
+    hm = lambda v: int(v[:2]) * 60 + int(v[3:])
+    sunset = hm(s["rise"]) <= s["h"] * 60 + s["m"] < hm(s["set"])
+    f.item(L["sun"], "sunset" if sunset else "sunrise", s["set"] if sunset else s["rise"])
 
     t = L["time"]
     digits = "%02d%02d" % (s["h"], s["m"])
@@ -98,17 +109,17 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False)
         f.put("sec/%s.png" % ss[i], t["sec"]["x"][i], t["sec"]["y"])
 
     gc = L["gauge_colors"]
-    for k, frac, val in (("steps", min(1, s["steps"] / s["goal"]), s["steps"]), ("charge", s["charge"] / 100, s["charge"])):
+    st = s["steps"]
+    steps = (str(st), None) if st < 10000 else ("%.1f" % (math.floor(st / 100 + 0.5) / 10), ["u_k"])
+    for k, frac, (val, units) in (("steps", min(1, st / s["goal"]), steps), ("charge", s["charge"] / 100, (str(s["charge"]), None))):
         gg = L["gauges"][k]
-        f.arc(gg["cx"], gg["cy"], gg["r"], gg["w"], -90, 270, hexrgb(gc["track"]))
+        f.put("icon/track_%s.png" % k, *gg["track"])
         f.arc(gg["cx"], gg["cy"], gg["r"], gg["w"], -90, -90 + 360 * frac, hexrgb(gc[k]))
         f.put("icon/%s.png" % k, *gg["icon"])
-        f.run("gn", str(val), gg["box"], "c")
-        f.put("cap/%s.png" % k, *gg["cap"])
+        f.run("gn", val, gg["box"], "c", units)
     h = L["heart"]
     f.put("icon/heart.png", *h["icon"])
     f.run("num", str(s["hr"]), h["box"], "c")
-    f.put("cap/heart.png", *h["cap"])
 
     for k, val, units in (("recovery", s["recovery"], ["u_h"]), ("sleep", s["sleep"], [])):
         h = L["health"][k]
@@ -118,25 +129,20 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=False)
         x = h["cx"] - total / 2
         f.put("icon/%s.png" % k, round(x), h["icon_y"])
         f.run("num", val, {"x": round(x + h["icon_w"] + 5), "y": h["y"], "w": 0}, units=units)
-        f.put("cap/%s.png" % k, *h["cap"])
 
     for k, val, units in (("vo2", s["vo2"], []), ("hrv", s["hrv"], ["u_ms"])):
         fz = L["fitness"][k]
-        g = L["g"]["xs"]
-        keys = [KEYS.get(ch, ch) for ch in val] + units
-        total = fz["cap_w"] + 4 + sum(g["w"][q] for q in keys)
-        x = fz["cx"] - total / 2
-        f.put("cap/%s.png" % k, round(x), fz["cap_y"])
-        f.run("xs", val, {"x": round(x + fz["cap_w"] + 4), "y": fz["y"], "w": 0}, units=units)
+        f.put("icon/%s.png" % k, *fz["icon"])
+        f.run("sm", val, fz["box"], units=units)
 
     bt = L["batt"]
-    g = L["g"]["xs"]
+    g = L["g"]["sm"]
     text = str(s["batt"]) + "%"
     keys = [KEYS.get(ch, ch) for ch in text]
     total = bt["icon_w"] + 3 + sum(g["w"][k] for k in keys)
     x = bt["cx"] - total / 2
     f.put("icon/batt.png", round(x), bt["icon_y"])
-    f.run("xs", text, {"x": round(x + bt["icon_w"] + 3), "y": bt["y"], "w": 0})
+    f.run("sm", text, {"x": round(x + bt["icon_w"] + 3), "y": bt["y"], "w": 0})
     return finish(f.im)
 
 
@@ -147,7 +153,7 @@ def render_aod(root, L, s=SAMPLE):
     for i in range(4):
         f.put("aod/%s.png" % digits[i], a["x"][i], a["y"])
     f.put("aod/colon.png", a["colon"], a["y"])
-    date_row(f, L, s)
+    date_row(f, L, s, "date_aod")
     return finish(f.im)
 
 
@@ -184,29 +190,32 @@ def render_sheet(root, L, path, info=None, cols=8, cell=233):
     sheet.save(path, quality=88)
 
 
-def render_weather_gif(root, L, path, tick, loops=2):
+def render_weather_gif(root, L, path, tick, loops=2, cell=200):
     """Animated weather preview over the generated skylines (never over your photos, which
-    may not be published). Lightning flashes once, as on the watch (every few seconds)."""
+    may not be published). Lightning and shooting stars appear once, as on the watch (every
+    few seconds)."""
     import city
     W = L["W"]
-    panels = [("night", 15), ("day", 8), ("dusk", 5)]       # thunderstorm, snow, light rain
+    panels = [("night", 15), ("night", 28), ("day", 3),       # thunderstorm, clear night, sunny
+              ("day", 0), ("day", 8), ("dawn", 13)]           # cloudy, snow, fog
     bgs = {t: city.base(t, W, W, (W, W)) for t, _ in panels}
     n = len(L["fx"]["frames"])
-    burst = (n + 2, n + 4)                                    # double flash in the second loop
-    cell = W // 2
+    flash_at = {n + 2: 1, n + 3: 2}                          # the two flash steps, second loop
+    cols = 3
     frames = []
     for k in range(n * loops):
-        im = Image.new("RGB", (len(panels) * (cell + 4) + 4, cell + 8), (24, 26, 34))
+        im = Image.new("RGB", (cols * (cell + 4) + 4, 2 * (cell + 4) + 4), (24, 26, 34))
         for i, (tod, code) in enumerate(panels):
-            face = render(root, L, frame=k % n, s=dict(SAMPLE, cond=code), bg=bgs[tod], flash=k in burst)
+            face = render(root, L, frame=k % n, s=dict(SAMPLE, cond=code), bg=bgs[tod], flash=flash_at.get(k, 0))
             face = face.resize((cell, cell), Image.LANCZOS)
-            im.paste(face, (4 + i * (cell + 4), 4), face)
+            im.paste(face, (4 + (i % cols) * (cell + 4), 4 + (i // cols) * (cell + 4)), face)
         frames.append(im)
-    # one palette for all frames (from a plain and a lightning frame), no dithering: the
-    # parts that don't change compress far better
+    # one palette for all frames (from a plain and a flash frame), no dithering: the parts
+    # that don't change compress far better
+    first = min(flash_at)
     mosaic = Image.new("RGB", (frames[0].width, frames[0].height * 2))
     mosaic.paste(frames[0], (0, 0))
-    mosaic.paste(frames[burst[0] % len(frames)], (0, frames[0].height))
+    mosaic.paste(frames[first % len(frames)], (0, frames[0].height))
     pal = mosaic.quantize(256, method=Image.Quantize.MEDIANCUT)
     q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
     q[0].save(path, save_all=True, append_images=q[1:], duration=tick, loop=0, optimize=True)

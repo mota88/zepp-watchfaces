@@ -46,7 +46,8 @@ PHOTO_VIGNETTE = 0.45           # 0..1: darkening at the screen edge, behind the
 # (RGB565, smooth gradients) instead of a 256-colour palette (blotchy). Costs about
 # 0.45 MB per photo on the watch instead of 0.22 MB.
 PHOTO_16BIT = True
-BEZEL_R = 216                   # compass bezel: radius of the marker centres
+BEZEL_R = 206                   # compass bezel: radius of the N/E/S/W letter centres
+RING_TRACK_ALPHA = 70           # 0..255: opacity of the ring gauges' track (in the ring's colour)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -56,9 +57,16 @@ PHOTOS = os.path.join(REPO, "photos")
 REVIEW_SHEET = os.path.join(PHOTOS, "review_sheet.jpg")   # not in git, like the photos
 TODS = ("dawn", "day", "dusk", "night")
 MOODS = ("clear", "clouds", "rain", "snow", "fog")
-# Background photos: photos/<dawn|day|dusk|night>/*.jpg. The face picks one from
-# the pool for the current time of day and changes it every hour. Crop per photo lives
-# in photos/crops.json (see photo_crop below).
+# Background photos: photos/<dawn|day|dusk|night>/ for any weather, and optionally
+# photos/<time of day>/<clear|clouds|rain|snow|fog>/ for photos that match the weather.
+# The face picks from the pool for the current time of day and today's weather, and
+# changes photo every hour. Crop per photo lives in photos/crops.json (see photo_crop).
+# Weather code (0..28) -> mood; codes not listed (sunny, unknown) prefer "clear".
+WEATHER_MOOD = {0: "clouds", 4: "clouds", 26: "clouds",
+                1: "rain", 5: "rain", 7: "rain", 10: "rain", 15: "rain", 18: "rain", 19: "rain",
+                20: "rain", 21: "rain", 24: "rain", 27: "rain",
+                2: "snow", 6: "snow", 8: "snow", 9: "snow", 12: "snow", 16: "snow",
+                13: "fog", 14: "fog", 11: "fog", 17: "fog", 22: "fog", 23: "fog"}
 PHOTO_CROP_DEFAULT = {"x": 0.5, "y": 0.5, "zoom": 1.0, "ev": 0.0}
 # Used to work out sunrise/sunset when the watch gives no sun times (Madrid).
 HOME = {"lat": 40.4168, "lon": -3.7038}
@@ -70,9 +78,10 @@ FX_H = H                        # height of the weather animation layer (from th
 REVIEW = True
 
 COLORS = {
+    # values are white; coral is the one text accent (weekday, seconds); the metric
+    # colours below are only used for rings and icons
     "text": (255, 255, 255),
-    "date": (232, 232, 232),
-    "caption": (200, 200, 200),
+    "date": (255, 255, 255),
     "unit": (170, 170, 170),
     "steps": (200, 240, 60),     # lime
     "heart": (255, 96, 92),      # coral
@@ -85,7 +94,7 @@ COLORS = {
     "vo2": (255, 150, 90),
     "hrv": (110, 220, 150),
     "muted": (160, 160, 160),
-    "bezel": (170, 170, 170),
+    "bezel": (215, 215, 215),
     "north": (255, 80, 70),
     "aod": (255, 255, 255),
 }
@@ -95,17 +104,16 @@ MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", 
 
 # glyph keys -> characters (file names avoid punctuation)
 PUNCT = {"minus": "-", "dot": ".", "colon": ":", "slash": "/", "pct": "%", "deg": "°"}
-UNITS = {"kmh": "km/h", "m": "m", "h": "h", "ms": "ms"}
+UNITS = {"kmh": "km/h", "m": "m", "h": "h", "ms": "ms", "k": "k"}
 
 # digit sets: name -> (weight, size, colour, shadow, outline, extras)
 SETS = {
     "time": (600, 108, COLORS["text"], True, False, False),
     "sec": (600, 44, COLORS["seconds"], True, False, False),
     "aod": (600, 108, COLORS["aod"], False, True, False),
-    "num": (600, 34, COLORS["text"], True, False, True),     # heart rate, recovery, sleep
-    "gn": (600, 24, COLORS["text"], True, False, True),      # numbers inside rings
-    "sm": (600, 24, COLORS["text"], True, False, True),       # weather, date, small rows
-    "xs": (600, 20, COLORS["text"], True, False, True),       # sun times, VO2max, HRV, battery
+    "num": (600, 38, COLORS["text"], True, False, True),     # heart rate, recovery, sleep
+    "gn": (600, 28, COLORS["text"], True, False, True),      # numbers inside rings
+    "sm": (600, 26, COLORS["text"], True, False, True),      # weather, date, sun, VO2max, HRV, battery
 }
 
 
@@ -201,15 +209,6 @@ class GlyphSet:
                 "w": {k: v - 2 * self.pad for k, v in self.widths.items()}}
 
 
-def caption(text, color=None, size=13, track=1.6, shadow=True):
-    f = font(500, size)
-    tw = sum(f.getlength(c) for c in text) + track * (len(text) - 1)
-    l, t, r, b = f.getbbox("A", anchor="ls")
-    w, h = int(math.ceil(tw)) + 4, int(b - t) + 6
-    m = text_mask(f, text, w, h, 2, 3 - t, track)
-    return shadowed(m, color or COLORS["caption"], shadow)
-
-
 def halo(im):
     """Soft dark shadow under an icon so it reads on top of photos."""
     a = im.getchannel("A").filter(ImageFilter.GaussianBlur(1.6)).point(lambda v: int(v * 0.8))
@@ -299,12 +298,12 @@ def main():
         shutil.rmtree(img_dir)
     rel = lambda p: os.path.join(img_dir, p)
 
-    # -- backgrounds: a photo pool per time of day ----------------------------------
+    # -- backgrounds: a photo pool per time of day and weather ---------------------------
     crops = {}
     cp = os.path.join(PHOTOS, "crops.json")
     if os.path.exists(cp):
         crops = {k: v for k, v in json.load(open(cp)).items() if not k.startswith("_")}
-    pool = {}
+    pool = {}                   # time of day -> {"any" or mood: number of photos}
     review = []
     photo_info = {}             # bg image -> {"mean", "ev"}: shown on the review sheet
 
@@ -313,17 +312,26 @@ def main():
         save_photo(im, rel(out))
         photo_info[out] = info
 
+    def photos_in(folder):
+        if not os.path.isdir(folder):
+            return []
+        return sorted(f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".jpeg", ".png")))
+
     for t in TODS:
         folder = os.path.join(PHOTOS, t)
-        files = sorted(f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".jpeg", ".png"))) if os.path.isdir(folder) else []
-        if not files:
-            save_photo(city.base(t, W, BG_H, FADE or (BG_H, BG_H)), rel("bg/%s_0.png" % t), grade=False)
-            pool[t] = 1
+        groups = [("any", "", photos_in(folder))] + [(m, m + "/", photos_in(os.path.join(folder, m))) for m in MOODS]
+        groups = [gr for gr in groups if gr[2]]
+        if not groups:
+            save_photo(city.base(t, W, BG_H, FADE or (BG_H, BG_H)), rel("bg/%s_any_0.png" % t), grade=False)
+            pool[t] = {"any": 1}
             continue
-        for i, f in enumerate(files):
-            add_photo(os.path.join(folder, f), t + "/" + f, "bg/%s_%d.png" % (t, i))
-            review.append(["bg/%s_%d.png" % (t, i), "%s/%s" % (t, f.rsplit(".", 1)[0])])
-        pool[t] = len(files)
+        pool[t] = {}
+        for mood, sub, files in groups:
+            for i, f in enumerate(files):
+                out = "bg/%s_%s_%d.png" % (t, mood, i)
+                add_photo(os.path.join(folder, sub + f), t + "/" + sub + f, out)
+                review.append([out, "%s/%s%s" % (t, sub, f.rsplit(".", 1)[0])])
+            pool[t][mood] = len(files)
     if REVIEW:
         # every other photo under photos/ (any folder, e.g. review/ or unused/)
         extra = []
@@ -339,7 +347,7 @@ def main():
             add_photo(os.path.join(PHOTOS, rp), rp.replace(os.sep, "/"), "bg/review_%d.png" % i)
             review.append(["bg/review_%d.png" % i, rp.replace(os.sep, "/").rsplit(".", 1)[0]])
 
-    # -- weather: tints, looping animations and lightning, chosen by weather code -------
+    # -- weather: tints, looping animations and flashes, chosen by weather code ----------
     fx_fade = (FX_H - 50, FX_H) if FX_H < H else None
     # every image in one IMG_LEVEL array must have the same size, so "nothing" is a
     # transparent image as large as the layer it stands in for
@@ -347,18 +355,25 @@ def main():
     save(Image.new("RGBA", (W, FX_H), (0, 0, 0, 0)), rel("fx/none.png"))
     for k in fx.WASHES:
         save(fx.wash(k, W, BG_H, FADE), rel("fx/wash_%s.png" % k))
-    save(fx.flash(W, BG_H), rel("fx/flash.png"))
+    # two flash images, shown one tick each: lightning then its afterglow, or a shooting star
+    save(fx.flash(W, BG_H), rel("fx/flash_0.png"))
+    save(fx.flash(W, BG_H, 0.5), rel("fx/flash_1.png"))
+    for n in range(2):
+        save(fx.meteor(W, BG_H, n), rel("fx/meteor_%d.png" % n))
     for k in fx.ANIMS:
         for n, im in enumerate(fx.anim_frames(k, W, FX_H, fx_fade)):
             save(im, rel("fx/%s_%d.png" % (k, n)))
-    fx_wash, fx_flash = [], []
+    fx_wash, fx_flash = [], [[], []]
     fx_frames = [[] for _ in range(fx.FRAMES)]
     for code in range(29):
         wsh, an = fx.WEATHER_FX[code]
         fx_wash.append("fx/wash_%s.png" % wsh if wsh else "fx/wash_none.png")
-        fx_flash.append("fx/flash.png" if code in fx.FLASH_CODES else "fx/wash_none.png")
+        for n in range(2):
+            fx_flash[n].append("fx/flash_%d.png" % n if code in fx.FLASH_CODES else
+                               "fx/meteor_%d.png" % n if code in fx.METEOR_CODES else "fx/wash_none.png")
+        slots = fx.order(an) if an else None
         for n in range(fx.FRAMES):
-            fx_frames[n].append("fx/%s_%d.png" % (an, n) if an else "fx/none.png")
+            fx_frames[n].append("fx/%s_%d.png" % (an, slots[n]) if an else "fx/none.png")
 
     # -- glyph sets -------------------------------------------------------------------
     sets = {}
@@ -378,52 +393,49 @@ def main():
 
     # -- icons ---------------------------------------------------------------------------
     for i in range(29):
-        save(halo(icons.weather(i, 24)), rel("icon/weather/%d.png" % i))
+        save(halo(icons.weather(i, 26)), rel("icon/weather/%d.png" % i))
     icon_specs = {
-        "steps": (icons.steps, 18, COLORS["steps"]),
-        "heart": (icons.heart, 22, COLORS["heart"]),
-        "charge": (icons.bolt, 18, COLORS["charge"]),
-        "wind": (icons.wind, 18, COLORS["muted"]),
-        "drop": (icons.drop, 16, COLORS["charge"]),
-        "alt": (icons.mountain, 18, COLORS["muted"]),
-        "sunrise": (lambda s, c: icons.sun_arrow(s, c, True), 18, COLORS["weather"]),
-        "sunset": (lambda s, c: icons.sun_arrow(s, c, False), 18, (255, 130, 70)),
-        "recovery": (icons.recovery, 24, COLORS["recovery"]),
-        "sleep": (icons.sleep, 24, COLORS["sleep"]),
-        "batt": (icons.bolt, 13, COLORS["steps"]),
+        "steps": (icons.steps, 20, COLORS["steps"]),
+        "heart": (icons.heart, 24, COLORS["heart"]),
+        "charge": (icons.bolt, 20, COLORS["charge"]),
+        "wind": (icons.wind, 20, COLORS["muted"]),
+        "drop": (icons.drop, 18, COLORS["charge"]),
+        "alt": (icons.mountain, 20, COLORS["muted"]),
+        "sunrise": (lambda s, c: icons.sun_arrow(s, c, True), 20, COLORS["weather"]),
+        "sunset": (lambda s, c: icons.sun_arrow(s, c, False), 20, (255, 130, 70)),
+        "recovery": (icons.recovery, 26, COLORS["recovery"]),
+        "sleep": (icons.sleep, 26, COLORS["sleep"]),
+        "vo2": (icons.lungs, 22, COLORS["vo2"]),
+        "hrv": (icons.hrv, 22, COLORS["hrv"]),
+        "batt": (icons.bolt, 16, COLORS["steps"]),
     }
-    isize = {"weather": (24, 24)}
+    isize = {"weather": (26, 26)}
     for k, (fn, s, col) in icon_specs.items():
         im = halo(fn(s, col))
         save(im, rel("icon/%s.png" % k))
         isize[k] = im.size
-    # compass bezel markers
-    bez = {"N": bezel_letter("N", 24, (255, 255, 255), COLORS["north"])}
+    # compass bezel: upright letters that the face moves around the edge, and dots that
+    # stand in for the ring's ticks if the watch can't rotate it
+    bez = {"N": bezel_letter("N", 34, COLORS["north"])}
     for k in ("E", "S", "W"):
-        bez[k] = bezel_letter(k, 18, COLORS["bezel"])
+        bez[k] = bezel_letter(k, 28, COLORS["bezel"])
+    bez = {k: halo(im) for k, im in bez.items()}
     bez["dot"] = icons.dot(8, COLORS["bezel"])
     for k, im in bez.items():
         save(im, rel("bezel/%s.png" % k))
-    # rotating compass ring and the fixed index mark
-    save(fx.compass_ring(W, FONT), rel("bezel/ring.png"))
+    # rotating compass ring (ticks only) and the fixed index mark
+    save(fx.compass_ring(W), rel("bezel/ring.png"))
     # shown while the compass has no heading yet (not calibrated): all grey, not rotated
     grey = (110, 110, 110)
-    save(fx.compass_ring(W, FONT, north=grey, fg=grey, dim=(80, 80, 80)), rel("bezel/ring_off.png"))
+    save(fx.compass_ring(W, north=grey, fg=grey, dim=(80, 80, 80)), rel("bezel/ring_off.png"))
     save(fx.lubber(), rel("bezel/lubber.png"))
     # transparent image for tap areas
     save(Image.new("RGBA", (8, 8), (0, 0, 0, 0)), rel("click.png"))
 
-    caps = {"steps": "STEPS", "heart": "BPM", "charge": "HYBRIDCHARGE", "recovery": "RECOVERY",
-            "sleep": "SLEEP", "vo2": "VO2MAX", "hrv": "HRV"}
-    csize = {}
-    for k, t in caps.items():
-        im = caption(t, color={"vo2": COLORS["vo2"], "hrv": COLORS["hrv"]}.get(k), size=14 if k in ("vo2", "hrv") else 13)
-        save(im, rel("cap/%s.png" % k))
-        csize[k] = im.size
-
     # -- layout ----------------------------------------------------------------------------
     g = {n: s.meta() for n, s in sets.items()}
     L = {"W": W, "bg_h": BG_H, "fx_h": FX_H, "g": g, "bgpool": pool, "home": HOME,
+         "moods": [WEATHER_MOOD.get(code, "clear") for code in range(29)],
          "review": review if REVIEW and review else None,   # no photos (fresh clone): normal mode
          "fx": {"wash": fx_wash, "frames": fx_frames, "flash": fx_flash, "tick": fx.TICK_MS}}
 
@@ -446,32 +458,42 @@ def main():
             x += isize[ic][0] + 4 + bw + gap
         return out
 
-    # bezel
-    L["bezel"] = {"r": BEZEL_R, "marks": [["N", 24], ["dot", 8], ["E", 18], ["dot", 8],
-                                          ["S", 18], ["dot", 8], ["W", 18], ["dot", 8]]}
+    key_of = {v: k for k, v in PUNCT.items()}
 
-    # weather: two rows
-    L["weather"] = centred_row(58, [("cond", "weather", 44), ("wind", "wind", 64)])
-    L["weather"].update(centred_row(86, [("hum", "drop", 42), ("alt", "alt", 58)]))
+    def text_w(set_name, text, units=()):
+        """Width of a value as the face draws it (sum of glyph advances)."""
+        adv = g[set_name]["w"]
+        return int(math.ceil(sum(adv[key_of.get(ch, ch)] for ch in text) + sum(adv[u] for u in units)))
 
-    # date row: [sunrise ↑ 07:54]  TUE 10 NOV  [sunset ↓ 18:02]
-    dy = 114
+    # bezel: the ring image only has ticks; upright N/E/S/W letters sit at radius r
+    L["bezel"] = {"r": BEZEL_R, "letters": [[k, bez[k].size[0]] for k in ("N", "E", "S", "W")],
+                  "dot": bez["dot"].size[0]}
+
+    # weather: two rows (box widths fit the longest usual value)
+    L["weather"] = centred_row(60, [("cond", "weather", text_w("sm", "-12°")),
+                                    ("wind", "wind", text_w("sm", "12", ["u_kmh"]))])
+    L["weather"].update(centred_row(90, [("hum", "drop", text_w("sm", "100%")),
+                                         ("alt", "alt", text_w("sm", "1234", ["u_m"]))]))
+
+    # date row: WED 11 NOV, then the next sun event (sunrise or sunset) with its icon
+    dy = 120
     dd_w = 2 * g["sm"]["w"]["0"] + 2 * g["sm"]["pad"]
     gap = 6 - 2 * sm.pad
-    date_w = (wk_w - 2 * sm.pad) + 6 + 2 * g["sm"]["w"]["0"] + 6 + (mo_w - 2 * sm.pad)
-    # visible width of a typical date ("TUE 10 NOV")
-    vis = sm.f.getlength("TUE") + 4 + 6 + 2 * g["sm"]["w"]["0"] + 6 + sm.f.getlength("NOV") + 4
-    sun_box = int(math.ceil(4 * g["xs"]["w"]["0"] + g["xs"]["w"]["colon"]))
-    sun_w = isize["sunrise"][0] + 3 + sun_box
-    total = sun_w + 12 + vis + 12 + sun_w
+    wk_vis = sm.f.getlength("WED") + 4          # a typical weekday as drawn (2 px tracking)
+    mo_vis = sm.f.getlength("NOV") + 4
+    date_vis = wk_vis + 6 + 2 * g["sm"]["w"]["0"] + 6 + mo_vis
+    sun_box = text_w("sm", "18:00")
+    total = date_vis + 18 + isize["sunrise"][0] + 3 + sun_box
     x0 = CX - total / 2
     # weekday box is right-aligned, so its visible text ends at the box's right edge
-    wk_x = x0 + sun_w + 12 + (sm.f.getlength("TUE") + 4) - wk_w + sm.pad
+    wk_x = x0 + wk_vis - wk_w + sm.pad
     dd_x = wk_x + wk_w + gap
     mo_x = dd_x + dd_w + gap
     L["date"] = {"wk": [int(wk_x), row(dy, "sm")], "dd": [int(dd_x), row(dy, "sm")], "mo": [int(mo_x), row(dy, "sm")]}
-    L["sun"] = {"rise": item(x0, dy, "sunrise", sun_box, "xs", gap=3),
-                "set": item(x0 + total - sun_w, dy, "sunset", sun_box, "xs", gap=3)}
+    # always-on shows the date without the sun event: the same row, centred on its own
+    shift = (CX - date_vis / 2) - x0
+    L["date_aod"] = {k: [int(round(v[0] + shift)), v[1]] for k, v in L["date"].items()}
+    L["sun"] = item(x0 + date_vis + 18, dy, "sunrise", sun_box, "sm", gap=3)
 
     # time HH:MM + seconds (baseline-aligned, smaller, accent colour)
     tg, sg = g["time"], g["sec"]
@@ -479,7 +501,7 @@ def main():
     sw_d = sg["w"]["0"] + 1
     total = 4 * tw_d + tw_c + 6 + 2 * sw_d
     tx = CX - total // 2 - tg["pad"]
-    ty = int(round(172 - tg["vc"]))
+    ty = int(round(176 - tg["vc"]))
     t_base = ty + sets["time"].baseline
     sx = tx + 4 * tw_d + tw_c + 6 + tg["pad"] - sg["pad"]
     L["time"] = {"x": [tx, tx + tw_d, tx + 2 * tw_d + tw_c, tx + 3 * tw_d + tw_c],
@@ -490,56 +512,61 @@ def main():
     ax = CX - total_a // 2 - tg["pad"]
     L["aod"] = {"x": [ax, ax + tw_d, ax + 2 * tw_d + tw_c, ax + 3 * tw_d + tw_c], "colon": ax + 2 * tw_d + 3, "y": ty}
 
-    # stats: ring gauges (steps, HybridCharge) and heart rate in the middle
-    gy = 268
+    # stats: ring gauges (steps, HybridCharge) and heart rate in the middle; no captions,
+    # the icons and ring colours say what each one is
+    gy, gr, gwid = 270, 44, 6
     L["gauges"] = {}
-    for k, cx in (("steps", CX - 104), ("charge", CX + 104)):
+    for k, cx in (("steps", CX - 106), ("charge", CX + 106)):
         iw, ih = isize[k]
-        cw, ch = csize[k]
-        L["gauges"][k] = {"cx": cx, "cy": gy, "r": 38, "w": 5,
-                          "icon": [cx - iw // 2, gy - 14 - ih // 2],
-                          "box": {"x": cx - 32, "y": row(gy + 8, "gn"), "w": 64, "h": g["gn"]["h"]},
-                          "cap": [cx - cw // 2, gy + 50 - ch // 2]}
+        # see-through track in the metric's own colour; the watch draws the fill on top.
+        # The watch strokes arcs inside their box (radius gr), so the track does too.
+        track = icons.ring(gr - gwid / 2, gwid, COLORS[k], RING_TRACK_ALPHA)
+        save(track, rel("icon/track_%s.png" % k))
+        L["gauges"][k] = {"cx": cx, "cy": gy, "r": gr, "w": gwid,
+                          "track": [cx - track.size[0] // 2, gy - track.size[1] // 2],
+                          "icon": [cx - iw // 2, gy - 15 - ih // 2],
+                          "box": {"x": cx - 34, "y": row(gy + 10, "gn"), "w": 68, "h": g["gn"]["h"]}}
     iw, ih = isize["heart"]
-    cw, ch = csize["heart"]
-    L["heart"] = {"icon": [CX - iw // 2, gy - 22 - ih // 2],
-                  "box": {"x": CX - 40, "y": row(gy + 6, "num"), "w": 80, "h": g["num"]["h"]},
-                  "cap": [CX - cw // 2, gy + 50 - ch // 2]}
-    L["gauge_colors"] = {"track": 0x262626, "steps": 0xC8F03C, "charge": 0x5AC8FA}
+    L["heart"] = {"icon": [CX - iw // 2, gy - 20 - ih // 2],
+                  "box": {"x": CX - 44, "y": row(gy + 12, "num"), "w": 88, "h": g["num"]["h"]}}
+    L["gauge_colors"] = {"steps": 0xC8F03C, "charge": 0x5AC8FA}
 
-    # sunrise / sunset, recovery / sleep, battery
-    # recovery and sleep: larger, with captions and big tap areas
+    # recovery and sleep: icon + large value, centred on their column
+    hy = 348
     L["health"] = {}
-    for k, cx in (("recovery", CX - 62), ("sleep", CX + 62)):
+    for k, cx in (("recovery", CX - 66), ("sleep", CX + 66)):
         iw, ih = isize[k]
-        cw, ch = csize[k]
-        L["health"][k] = {"cx": cx, "icon_w": iw, "icon_y": 350 - ih // 2, "y": row(350, "num"),
-                          "cap": [cx - cw // 2, 375 - ch // 2], "tap": [cx - 56, 330, 112, 54]}
-    # VO2max and HRV: small, label + value
+        L["health"][k] = {"cx": cx, "icon_w": iw, "icon_y": hy - ih // 2, "y": row(hy, "num"),
+                          "tap": [cx - 60, hy - 22, 120, 44]}
+    # VO2max and HRV: icon + value (HRV may be drawn by the watch, so its box is fixed)
+    fy = 390
     L["fitness"] = {}
-    for k, cx in (("vo2", CX - 56), ("hrv", CX + 56)):
-        cw, ch = csize[k]
-        L["fitness"][k] = {"cx": cx, "cap_w": cw, "cap_y": 400 - ch // 2, "y": row(400, "xs"),
-                           "box": {"x": cx - 4, "y": row(400, "xs"), "w": 50, "h": g["xs"]["h"]}}
-    L["batt"] = {"y": row(426, "xs"), "icon_y": 426 - isize["batt"][1] // 2, "icon_w": isize["batt"][0], "cx": CX}
+    for k, cx, sample in (("vo2", CX - 60, "48"), ("hrv", CX + 60, "96")):
+        iw, ih = isize[k]
+        units = ["u_ms"] if k == "hrv" else []
+        x = cx - (iw + 5 + text_w("sm", sample, units)) / 2
+        L["fitness"][k] = {"icon": [int(round(x)), fy - ih // 2],
+                           "box": {"x": int(round(x + iw + 5)), "y": row(fy, "sm"),
+                                   "w": text_w("sm", "100", units) + 4, "h": g["sm"]["h"]}}
+    by = 418
+    L["batt"] = {"y": row(by, "sm"), "icon_y": by - isize["batt"][1] // 2, "icon_w": isize["batt"][0], "cx": CX}
 
     # tap areas (transparent images sized to each area)
     tw_all = L["time"]["sec"]["x"][1] + g["sec"]["w"]["0"] + 2 * g["sec"]["pad"] - L["time"]["x"][0]
-    w_a, w_b = L["weather"]["cond"], L["weather"]["alt"]
     hl = L["health"]
     taps = {
         "time": [L["time"]["x"][0], L["time"]["y"] + 8, tw_all, g["time"]["h"] - 16],
-        "weather": [CX - 110, 42, 220, 30],
-        "altitude": [CX, 74, 100, 26],
-        "sun": [CX - 150, 100, 300, 28],
-        "steps": [L["gauges"]["steps"]["cx"] - 46, 222, 92, 104],
-        "heart": [CX - 40, 222, 80, 104],
-        "charge": [L["gauges"]["charge"]["cx"] - 46, 222, 92, 104],
+        "weather": [CX - 120, 44, 240, 32],
+        "altitude": [CX, 76, 120, 28],
+        "sun": [CX - 130, 104, 260, 26],
+        "steps": [L["gauges"]["steps"]["cx"] - 48, gy - 48, 96, 96],
+        "heart": [CX - 44, gy - 48, 88, 96],
+        "charge": [L["gauges"]["charge"]["cx"] - 48, gy - 48, 96, 96],
         "recovery": hl["recovery"]["tap"],
         "sleep": hl["sleep"]["tap"],
-        "vo2": [CX - 112, 388, 110, 26],
-        "hrv": [CX + 2, 388, 110, 26],
-        "battery": [CX - 40, 414, 80, 24],
+        "vo2": [CX - 124, fy - 15, 120, 30],
+        "hrv": [CX + 4, fy - 15, 120, 30],
+        "battery": [CX - 44, by - 14, 88, 28],
     }
     L["taps"] = {k: [int(v) for v in r] for k, r in taps.items()}
     save(Image.new("RGBA", (W, H), (0, 0, 0, 0)), rel("tap/debug.png"))

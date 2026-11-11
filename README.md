@@ -22,14 +22,17 @@ Not in git (see `.gitignore`):
 
 City + data face.
 
-- Top: a generated city skyline that follows the time of day (dawn, day, dusk, night),
-  with full-screen animated weather (rain, sleet, snow, blowing dust, lightning in
-  thunderstorms) and a tint or drifting fog that follow the watch's current weather.
-  Use your own photos instead by putting dawn/day/dusk/night .jpg files in photos/.
-- Compass bezel: the red N marker points north (only while the screen is on).
-- Weather (condition, temperature, wind, humidity) and altitude, full date, HH:MM with seconds.
-- Ring gauges for steps and HybridCharge, heart rate, sunrise and sunset, recovery time,
-  sleep score, battery.
+- Background: your photos (or a generated city skyline) for the time of day (dawn, day,
+  dusk, night) and today's weather, with full-screen animated weather on top that follows
+  the watch's current weather: rain, sleet, snow, blowing dust, sun rays, drifting clouds
+  and fog, stars with the odd shooting star, lightning in thunderstorms.
+- Compass bezel: the ring turns so N points north, with N/E/S/W kept upright (only while
+  the screen is on).
+- Weather (condition, temperature, wind, humidity) and altitude, the date with the next
+  sunrise or sunset, HH:MM with seconds.
+- Ring gauges for steps (16.3k above 9,999) and HybridCharge, heart rate, recovery time,
+  sleep score, VO2max, HRV, battery. Values are white, coral is the only text accent, and
+  the metric colours are kept to the rings and icons (no text captions).
 - Taps: weather, altitude, steps, HybridCharge, heart rate, sun times, sleep and battery open the matching watch app (IMG_CLICK areas, if the firmware offers them).
 - Always-on: outlined time and the date on black (about 2% of pixels lit; Zepp's limit is 10%).
 
@@ -79,8 +82,12 @@ From `meridian/`: `zeus bridge`, then `connect` and `install`; the `[meridian]` 
 
 ### Background photos and weather
 
-Put photos in `photos/dawn/`, `day/`, `dusk/` and `night/` (any number, any size).
-The face shows one from the pool for the current time of day and switches every hour.
+Put photos in `photos/dawn/`, `day/`, `dusk/` and `night/` (any number, any size), and
+photos that match a kind of weather in a subfolder: `photos/night/rain/`, `photos/day/snow/`
+(`clear`, `clouds`, `rain`, `snow`, `fog`). The face picks from the pool for the current time
+of day and today's forecast, and switches every hour: a photo for that weather, else one
+from the time of day's own folder (any weather), else one for that weather from the other
+twilight (dawn and dusk look alike), else whatever that time of day has.
 Dawn/day/dusk/night come from sunrise and sunset (from the watch, or calculated for `HOME` in
 `tools/gen_assets.py` when the watch gives none).
 
@@ -89,6 +96,7 @@ Crop per photo goes in `photos/crops.json`, keyed by the path under `photos/`
 
 ```
 "night/shanghai.jpg": {"x": 0.35, "y": 0.5, "zoom": 1.15, "ev": -0.3}
+"night/rain/shibuya_rain.jpg": {"y": 0.4}
 "day/dunes.jpg": [0.4, 1.0]          (older form: vertical focus, zoom)
 ```
 
@@ -119,7 +127,10 @@ adds 0.45 MB to the package, so review large sets on the sheet and only a shortl
 
 Weather is drawn on top of the photo, following the watch's current weather code (29 codes):
 a tint (cloudy, overcast, rain, storm, snow, haze; textured for fog and dust) and a
-full-screen looping animation (light/heavy rain, sleet, light/heavy snow, blowing dust).
-Thunderstorms add a lightning flash every few seconds. Loops are seamless (8 frames,
-`FRAMES` and `TICK_MS` in `tools/fx.py`; about 13 MB on the watch in total).
-The mapping is `WEATHER_FX` in `tools/fx.py`. Re-run `python3 tools/gen_assets.py` after changes.
+full-screen looping animation: light/heavy rain, sleet, light/heavy snow, blowing dust,
+sun rays (sunny), stars (clear night), drifting clouds (cloudy, overcast) and fog (fog, haze).
+Every few seconds thunderstorms add a lightning flash and clear nights a shooting star.
+Particles fade behind the central text (`FOCUS` in `tools/fx.py`) and stay strong at the edges.
+Loops are seamless (8 frames, `FRAMES` and `TICK_MS` in `tools/fx.py`; about 17 MB on the
+watch in total). The mapping is `WEATHER_FX` in `tools/fx.py`. Re-run
+`python3 tools/gen_assets.py` after changes.

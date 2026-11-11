@@ -302,6 +302,40 @@ def sleep(size, color):
     return c.done()
 
 
+def lungs(size, color):
+    """Two lung lobes and the windpipe: VO2max."""
+    c = Canvas(size)
+    m = c.layer()
+    d = ImageDraw.Draw(m)
+    for x0, x1 in ((0.06, 0.45), (0.55, 0.94)):
+        _ell(d, c, x0, 0.30, x1, 0.96)
+        d.rectangle([c.p(x0 + 0.07, 0.62), c.p(x1 - 0.07, 0.96)], fill=255)
+    cut = c.layer()
+    _ell(ImageDraw.Draw(cut), c, 0.38, 0.40, 0.62, 1.10)          # gap between the lobes
+    m = ImageChops.subtract(m, cut)
+    d = ImageDraw.Draw(m)
+    _line(d, c, [(0.5, 0.04), (0.5, 0.50)], 0.1)
+    _line(d, c, [(0.5, 0.44), (0.34, 0.58)], 0.08)
+    _line(d, c, [(0.5, 0.44), (0.66, 0.58)], 0.08)
+    c.add(m, color)
+    return c.done()
+
+
+def hrv(size, color):
+    """Heart with a pulse line cut through it: heart rate variability."""
+    c = Canvas(size)
+    m = c.layer()
+    d = ImageDraw.Draw(m)
+    _ell(d, c, 0.06, 0.10, 0.52, 0.56)
+    _ell(d, c, 0.48, 0.10, 0.94, 0.56)
+    d.polygon([c.p(0.08, 0.42), c.p(0.92, 0.42), c.p(0.5, 0.92)], fill=255)
+    pulse = c.layer()
+    _line(ImageDraw.Draw(pulse), c, [(0.0, 0.48), (0.30, 0.48), (0.40, 0.30), (0.54, 0.68),
+                                    (0.64, 0.48), (1.0, 0.48)], 0.09)
+    c.add(ImageChops.subtract(m, pulse), color)
+    return c.done()
+
+
 def sun_arrow(size, color, up):
     """Half sun on the horizon with an arrow above (up = sunrise)."""
     c = Canvas(size)
@@ -329,3 +363,17 @@ def dot(size, color):
     _ell(ImageDraw.Draw(m), c, 0.2, 0.2, 0.8, 0.8)
     c.add(m, color)
     return c.done()
+
+
+def ring(radius, width, color, alpha):
+    """See-through track of a ring gauge: centre line at `radius`, `width` px thick."""
+    size = int(math.ceil(2 * radius + width)) + 2
+    s = size * K
+    m = Image.new("L", (s, s), 0)
+    c, r_out, r_in = s / 2, (radius + width / 2) * K, (radius - width / 2) * K
+    d = ImageDraw.Draw(m)
+    d.ellipse([c - r_out, c - r_out, c + r_out, c + r_out], fill=alpha)
+    d.ellipse([c - r_in, c - r_in, c + r_in, c + r_in], fill=0)
+    im = Image.new("RGBA", (s, s), color + (0,))
+    im.putalpha(m)
+    return im.resize((size, size), Image.LANCZOS)

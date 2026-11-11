@@ -293,6 +293,15 @@ function astroSun() {
   return v
 }
 const nowMin = () => S.time.getHours() * 60 + S.time.getMinutes()
+// Today's forecast as a weather code, for the fallbacks without the watch's current
+// weather: 25 (unknown) without data, and at night the night version of the day codes
+// (moon and stars rather than sun).
+const NIGHT_CODE = { 0: 26, 1: 27, 3: 28 }
+function forecastCode() {
+  const f = st.forecast
+  if (!(f && f.index >= 0 && f.index <= 28)) return 25
+  return st.tod === 'night' && NIGHT_CODE[f.index] !== undefined ? NIGHT_CODE[f.index] : f.index
+}
 const pad2 = (n) => (n < 10 ? '0' : '') + n
 const fmtHM = (m) => pad2(Math.floor(m / 60)) + ':' + pad2(m % 60)
 
@@ -345,26 +354,30 @@ function secondsStop() {
   secTimer = null
 }
 // weather animation: cycles the frame layers while the screen is on and, every few
-// seconds, a double lightning flash (its image is transparent unless it's a thunderstorm)
+// seconds, shows the two flash layers one tick each (lightning and its afterglow in a
+// thunderstorm, a shooting star on a clear night; transparent in other weather)
 let fxTimer = null
-const fx = { frames: [], i: 0, flash: null, flashStep: 0, flashWait: 0 }
-const FLASH = [true, false, true, false] // one tick each: on, off, on, off
+const fx = { frames: [], i: 0, flashes: [], flashStep: 0, flashWait: 0 }
 const fxTicks = (ms) => Math.max(1, Math.round(ms / (L.fx.tick || 140)))
 function fxTick() {
   const prev = fx.frames[fx.i]
   fx.i = (fx.i + 1) % fx.frames.length
   safe(() => show(fx.frames[fx.i], true))
   safe(() => show(prev, false))
-  if (!fx.flash) return
-  if (fx.flashStep < FLASH.length) safe(() => show(fx.flash, FLASH[fx.flashStep++]))
-  else if (--fx.flashWait <= 0) {
+  if (!fx.flashes.length) return
+  if (fx.flashStep <= fx.flashes.length) {
+    // step k shows flash k (and hides the one before); one step past the end hides the last
+    const k = fx.flashStep++
+    if (k < fx.flashes.length) safe(() => show(fx.flashes[k], true))
+    if (k > 0) safe(() => show(fx.flashes[k - 1], false))
+  } else if (--fx.flashWait <= 0) {
     fx.flashStep = 0
-    fx.flashWait = fxTicks(4000 + Math.random() * 7000)
+    fx.flashWait = fxTicks(5000 + Math.random() * 8000)
   }
 }
 function fxStart() {
   if (fxTimer !== null || fx.frames.length < 2) return
-  fx.flashStep = FLASH.length
+  fx.flashStep = fx.flashes.length + 1
   fx.flashWait = fxTicks(1500 + Math.random() * 3000)
   fxTimer = safe(() => setInterval(fxTick, L.fx.tick || 140))
   if (fxTimer === undefined) fxTimer = null
@@ -372,7 +385,7 @@ function fxStart() {
 function fxStop() {
   if (fxTimer !== null) safe(() => clearInterval(fxTimer))
   fxTimer = null
-  if (fx.flash) safe(() => show(fx.flash, false))
+  fx.flashes.forEach((f) => safe(() => show(f, false)))
 }
 function wake() {
   readWeather()
@@ -447,16 +460,36 @@ WatchFace({
     readWeather()
     chunked('forecast', json(safe(() => S.weather.getForecastWeather())))
 
-    // -- background photo (pool per time of day) + weather wash and animation ---------
+    // -- background photo (pool per time of day and weather) + weather wash and animation ---
     step('background', () => {
       ui.createWidget(W.FILL_RECT, lvl({ x: 0, y: 0, w: L.W, h: L.W, color: 0x000000 }, BOTH))
-      const bg = makeImg(0, 0, img('bg/day_0.png'), NORMAL)
+      const bgPath = (tod, mood, i) => 'bg/' + tod + '_' + mood + '_' + i + '.png'
+      const bg = makeImg(0, 0, img(bgPath('day', Object.keys(L.bgpool.day)[0], 0)), NORMAL)
       st.reviewIdx = 0
       let reviewLabel = null
       if (L.review) {
         ui.createWidget(W.FILL_RECT, lvl({ x: 93, y: 18, w: L.W - 186, h: 24, radius: 12, color: 0x000000 }, NORMAL))
         reviewLabel = ui.createWidget(W.TEXT, lvl({ x: 93, y: 19, w: L.W - 186, h: 22, text: '', color: 0xffffff, text_size: 15,
           align_h: ui.align ? ui.align.CENTER_H : undefined }, NORMAL))
+      }
+      // Photo for the time of day and today's weather: one that matches the weather,
+      // else one for any weather, else a matching one from the other twilight (dawn and
+      // dusk look alike), else whatever this time of day has.
+      const pickBg = (tod) => {
+        const code = st.forecast && st.forecast.index >= 0 && st.forecast.index <= 28 ? st.forecast.index : 3
+        const mood = L.moods[code]
+        const twin = tod === 'dawn' ? 'dusk' : tod === 'dusk' ? 'dawn' : null
+        const p = L.bgpool[tod]
+        let t = tod
+        let m = p[mood] ? mood : p.any ? 'any' : null
+        if (!m && twin && L.bgpool[twin][mood]) {
+          t = twin
+          m = mood
+        }
+        if (!m) m = Object.keys(p)[0]
+        // a different photo from the pool every hour (stable within the hour)
+        const seed = S.time.getDate() * 31 + S.time.getHours() * 7 + S.time.getMonth()
+        return bgPath(t, m, ((seed * 2654435761) % 4294967296) % L.bgpool[t][m])
       }
       draw.sky = () => {
         const t = nowMin()
@@ -473,11 +506,7 @@ WatchFace({
           if (reviewLabel) safe(() => reviewLabel.setProperty(ui.prop.TEXT, (i + 1) + '/' + L.review.length + '  ' + L.review[i][1]))
           return
         }
-        // a different photo from the pool every hour (stable within the hour)
-        const n = L.bgpool[tod] || 1
-        const seed = S.time.getDate() * 31 + S.time.getHours() * 7 + S.time.getMonth()
-        setSrc(bg, img('bg/' + tod + '_' + ((seed * 2654435761) % 4294967296) % n + '.png'))
-        st.tod = tod
+        setSrc(bg, img(pickBg(tod)))
       }
       draw.sky()
 
@@ -490,30 +519,30 @@ WatchFace({
         const mk = (arr, h) => safe(() => ui.createWidget(W.IMG_LEVEL, lvl({ x: 0, y: 0, w: L.W, h: h, image_array: paths(arr), image_length: arr.length, type: t.id }, NORMAL)))
         const wash = mk(L.fx.wash, L.bg_h)
         const frames = L.fx.frames.map((arr) => mk(arr, L.fx_h))
-        const flash = mk(L.fx.flash, L.bg_h)
+        const flashes = L.fx.flash.map((arr) => mk(arr, L.bg_h))
         fx.wash = wash
-        const made = [wash, flash].concat(frames)
+        const made = [wash].concat(flashes, frames)
         if (made.every((w) => w)) {
           sys = true
           fx.frames = frames
-          fx.flash = flash
+          fx.flashes = flashes
           frames.forEach((f, k) => k > 0 && show(f, false))
-          show(flash, false)
+          flashes.forEach((f) => show(f, false))
           sources.push('weatherfx=sys:' + t.name)
         } else made.forEach((w) => w && safe(() => show(w, false)))
       }
       if (!sys) {
         const wash = makeImg(0, 0, img('fx/wash_none.png'), NORMAL)
         const frames = L.fx.frames.map(() => makeImg(0, 0, img('fx/none.png'), NORMAL))
-        const flash = makeImg(0, 0, img('fx/wash_none.png'), NORMAL)
+        const flashes = L.fx.flash.map(() => makeImg(0, 0, img('fx/wash_none.png'), NORMAL))
         fx.frames = frames
-        fx.flash = flash
+        fx.flashes = flashes
         frames.forEach((f, k) => k > 0 && show(f, false))
-        show(flash, false)
+        flashes.forEach((f) => show(f, false))
         draw.fx = () => {
-          const code = st.forecast && st.forecast.index >= 0 && st.forecast.index <= 28 ? st.forecast.index : 3
+          const code = forecastCode()
           setSrc(wash, img(L.fx.wash[code]))
-          setSrc(flash, img(L.fx.flash[code]))
+          flashes.forEach((f, k) => setSrc(f, img(L.fx.flash[k][code])))
           frames.forEach((f, k) => setSrc(f, img(L.fx.frames[k][code])))
         }
         draw.fx()
@@ -535,30 +564,43 @@ WatchFace({
           ring.setProperty(ui.prop.MORE, { x: 0, y: 0, w: L.W, h: L.W, src: img('bezel/ring.png'), center_x: CX, center_y: CX, angle: deg })
         }
       }
-      // fallback: separate N/E/S/W markers moved around the edge
-      let marks = null
+      // upright N/E/S/W letters, moved around the edge (the ring image only has ticks)
+      const letters = b.letters.map((m) => {
+        const w = makeImg(CX - m[1] / 2, CX - b.r - m[1] / 2, img('bezel/' + m[0] + '.png'), NORMAL)
+        w._size = m[1]
+        show(w, false)
+        return w
+      })
+      // fallback if the ring can't rotate: dots between the letters stand in for its ticks
+      let dots = null
       const fallback = () => {
         mode = 'markers'
         safe(() => show(ring, false))
-        marks = b.marks.map((m) => {
-          const w = makeImg(CX - m[1] / 2, CX - b.r - m[1] / 2, img('bezel/' + m[0] + '.png'), NORMAL)
-          w._size = m[1]
+        dots = [0, 1, 2, 3].map(() => {
+          const w = makeImg(CX - b.dot / 2, CX - b.r - b.dot / 2, img('bezel/dot.png'), NORMAL)
+          w._size = b.dot
           return w
         })
       }
+      const around = (ws, offset, a) =>
+        ws.forEach((m, i) => {
+          const r = ((offset + i * 90 - a) * Math.PI) / 180
+          place(m, CX + b.r * Math.sin(r) - m._size / 2, CX - b.r * Math.cos(r) - m._size / 2)
+        })
       let last = null
       draw.bezel = () => {
         const a = S.compass ? safe(() => S.compass.getDirectionAngle()) : undefined
         const ok = typeof a === 'number' && isFinite(a)
         cmp.last = a
         show(mark, ok)
+        letters.forEach((m) => show(m, ok))
         if (mode === 'ring') {
-          // no heading yet (e.g. not calibrated): grey ring, not turned
+          // no heading yet (e.g. not calibrated): grey ring, not turned, no letters
           if (!ok) {
             setSrc(ring, img('bezel/ring_off.png'))
             safe(() => rotate(0))
           } else setSrc(ring, img('bezel/ring.png'))
-        } else marks.forEach((m) => show(m, ok))
+        } else dots.forEach((m) => show(m, ok))
         if (!ok) {
           last = null
           return
@@ -568,17 +610,13 @@ WatchFace({
         if (mode === 'ring') {
           try {
             rotate(-a)
-            return
           } catch (e) {
             log('ring rotation failed: ' + e)
             fallback()
           }
         }
-        marks.forEach((m, i) => {
-          const r = ((i * 45 - a) * Math.PI) / 180
-          place(m, CX + b.r * Math.sin(r) - m._size / 2, CX - b.r * Math.cos(r) - m._size / 2)
-          show(m, true)
-        })
+        around(letters, 0, a)
+        if (dots) around(dots, 45, a)
       }
       draw.bezel()
       sources.push('compass=' + (S.compass ? 'js:' + mode : 'none'))
@@ -636,7 +674,7 @@ WatchFace({
 
       draw.weather = () => {
         const f = st.forecast
-        if (condJs) setSrc(cond, img('icon/weather/' + (f && f.index >= 0 && f.index <= 28 ? f.index : 25) + '.png'))
+        if (condJs) setSrc(cond, img('icon/weather/' + forecastCode() + '.png'))
         if (tempRun) {
           if (f && typeof f.low === 'number' && typeof f.high === 'number') tempRun.draw(toKeys(f.low + '/' + f.high + '°'), w.cond.box.x)
           else tempRun.draw(['none'], w.cond.box.x)
@@ -647,19 +685,23 @@ WatchFace({
       tapApp('altitude', ['ALTIMETER', 'ALTITUDE'], 'SYSTEM_APP_ALTIMETER')
     })
 
-    // -- date ------------------------------------------------------------------------------
+    // -- date (always-on: its own copy, centred, as the sun event isn't shown there) -----------
     step('date', () => {
-      const d = L.date
-      const wk = makeImg(d.wk[0], d.wk[1], img('sm/wk0.png'), BOTH)
-      const d1 = makeImg(d.dd[0], d.dd[1], img('sm/0.png'), BOTH)
-      const d2 = makeImg(d.dd[0] + G.sm.w['0'], d.dd[1], img('sm/0.png'), BOTH)
-      const mo = makeImg(d.mo[0], d.mo[1], img('sm/mo0.png'), BOTH)
+      const row = (d, level) => ({
+        wk: makeImg(d.wk[0], d.wk[1], img('sm/wk0.png'), level),
+        d1: makeImg(d.dd[0], d.dd[1], img('sm/0.png'), level),
+        d2: makeImg(d.dd[0] + G.sm.w['0'], d.dd[1], img('sm/0.png'), level),
+        mo: makeImg(d.mo[0], d.mo[1], img('sm/mo0.png'), level),
+      })
+      const rows = AOD !== undefined ? [row(L.date, NORMAL), row(L.date_aod, AOD)] : [row(L.date, BOTH)]
       draw.date = () => {
-        setSrc(wk, img('sm/wk' + ((S.time.getDay() + 6) % 7) + '.png'))
         const dd = pad2(S.time.getDate())
-        setSrc(d1, img('sm/' + dd[0] + '.png'))
-        setSrc(d2, img('sm/' + dd[1] + '.png'))
-        setSrc(mo, img('sm/mo' + (((S.time.getMonth() - 1) % 12 + 12) % 12) + '.png'))
+        rows.forEach((r) => {
+          setSrc(r.wk, img('sm/wk' + ((S.time.getDay() + 6) % 7) + '.png'))
+          setSrc(r.d1, img('sm/' + dd[0] + '.png'))
+          setSrc(r.d2, img('sm/' + dd[1] + '.png'))
+          setSrc(r.mo, img('sm/mo' + (((S.time.getMonth() - 1) % 12 + 12) % 12) + '.png'))
+        })
       }
       draw.date()
     })
@@ -715,9 +757,8 @@ WatchFace({
         const g = L.gauges[k]
         const box = { x: g.cx - g.r, y: g.cy - g.r, w: 2 * g.r, h: 2 * g.r }
         const arc = (end, color) => lvl({ x: box.x, y: box.y, w: box.w, h: box.h, line_width: g.w, color: color, start_angle: -90, end_angle: end }, NORMAL)
-        ui.createWidget(W.ARC, arc(270, gc.track))
+        makeImg(g.track[0], g.track[1], img('icon/track_' + k + '.png'), NORMAL)
         makeImg(g.icon[0], g.icon[1], img('icon/' + k + '.png'), NORMAL)
-        makeImg(g.cap[0], g.cap[1], img('cap/' + k + '.png'), NORMAL)
         if (k === 'steps') {
           const fill = ui.createWidget(W.ARC, arc(-89, gc.steps))
           gaugeFill.steps = (frac) => {
@@ -731,9 +772,12 @@ WatchFace({
 
       const s = L.gauges.steps
       const stepsDraw = centredRun('gn', s.box, 6, NORMAL)
+      // up to 9999 in full, then 16.3k (one decimal), then 123k
+      const stepsKeys = (n) =>
+        n < 10000 ? toKeys(n) : toKeys(n < 99950 ? (Math.round(n / 100) / 10).toFixed(1) : Math.round(n / 1000)).concat(['u_k'])
       draw.steps = () => {
         const cur = S.step.getCurrent()
-        stepsDraw(typeof cur === 'number' && cur >= 0 ? toKeys(Math.min(cur, 99999)) : ['none'])
+        stepsDraw(typeof cur === 'number' && cur >= 0 ? stepsKeys(Math.round(cur)) : ['none'])
         const goal = S.step.getTarget()
         if (gaugeFill.steps) gaugeFill.steps(cur / (goal > 0 ? goal : 10000))
       }
@@ -760,7 +804,6 @@ WatchFace({
     step('heart', () => {
       const h = L.heart
       makeImg(h.icon[0], h.icon[1], img('icon/heart.png'), NORMAL)
-      makeImg(h.cap[0], h.cap[1], img('cap/heart.png'), NORMAL)
       const hrDraw = centredRun('num', h.box, 3, NORMAL)
       draw.hr = () => {
         let v = typeof S.hr.getLast === 'function' ? S.hr.getLast() : 0
@@ -772,26 +815,32 @@ WatchFace({
       tapApp('heart', ['HEART'], 'SYSTEM_APP_HR')
     })
 
-    // -- sunrise and sunset ---------------------------------------------------------------------
+    // -- next sun event: sunrise until it's up, then sunset until it's down ------------------------
     step('sun', () => {
       const s = L.sun
-      makeImg(s.rise.icon[0], s.rise.icon[1], img('icon/sunrise.png'), NORMAL)
-      makeImg(s.set.icon[0], s.set.icon[1], img('icon/sunset.png'), NORMAL)
-      const riseSys = sysField('sunrise', ['SUN_RISE', 'SUNRISE'], s.rise.box, 'xs', { dot: 'colon' })
-      const setSys = sysField('sunset', ['SUN_SET', 'SUNSET'], s.set.box, 'xs', { dot: 'colon' })
-      const riseRun = riseSys ? null : makeRun('xs', 5, s.rise.box.y, NORMAL)
-      const setRun = setSys ? null : makeRun('xs', 5, s.set.box.y, NORMAL)
+      const icon = makeImg(s.icon[0], s.icon[1], img('icon/sunrise.png'), NORMAL)
+      // the watch's own times if it offers both (one shown at a time), otherwise ours
+      const riseSys = sysField('sunrise', ['SUN_RISE', 'SUNRISE'], s.box, 'sm', { dot: 'colon' })
+      const setSys = riseSys ? sysField('sunset', ['SUN_SET', 'SUNSET'], s.box, 'sm', { dot: 'colon' }) : null
+      const sys = !!(riseSys && setSys)
+      if (riseSys && !sys) show(riseSys, false)
+      const run = sys ? null : makeRun('sm', 5, s.box.y, NORMAL)
       draw.sun = () => {
         const t = sunTimes()
-        if (riseRun) riseRun.draw(t.known ? toKeys(fmtHM(t.sr)) : ['none'], s.rise.box.x)
-        if (setRun) setRun.draw(t.known ? toKeys(fmtHM(t.ss)) : ['none'], s.set.box.x)
+        const now = nowMin()
+        const sunset = t.known && now >= t.sr && now < t.ss
+        setSrc(icon, img(sunset ? 'icon/sunset.png' : 'icon/sunrise.png'))
+        if (sys) {
+          show(riseSys, !sunset)
+          show(setSys, sunset)
+        } else run.draw(t.known ? toKeys(fmtHM(sunset ? t.ss : t.sr)) : ['none'], s.box.x)
       }
       draw.sun()
-      if (riseRun) sources.push('sun=' + sunTimes().src)
+      sources.push('sun=' + (sys ? 'sys' : sunTimes().src))
       tapApp('sun', ['SUN_CURRENT', 'SUN_RISE', 'SUN_SET'], 'SYSTEM_APP_SUN_AND_MOON')
     })
 
-    // -- recovery time and sleep score (larger), VO2max and HRV (small) ----------------------------
+    // -- recovery time and sleep score (larger), VO2max and HRV ------------------------------------
     step('health', () => {
       const group = (spec, icon, set, max) => {
         const ic = makeImg(spec.cx, spec.icon_y, img('icon/' + icon + '.png'), NORMAL)
@@ -804,22 +853,15 @@ WatchFace({
         }
       }
       const h = L.health
-      makeImg(h.recovery.cap[0], h.recovery.cap[1], img('cap/recovery.png'), NORMAL)
-      makeImg(h.sleep.cap[0], h.sleep.cap[1], img('cap/sleep.png'), NORMAL)
       const recDraw = group(h.recovery, 'recovery', 'num', 5)
       const sleepDraw = group(h.sleep, 'sleep', 'num', 3)
 
       const f = L.fitness
-      const label = (k, valueW) => {
-        const x = f[k].cx - (f[k].cap_w + 4 + valueW) / 2
-        makeImg(x, f[k].cap_y, img('cap/' + k + '.png'), NORMAL)
-        return { x: Math.round(x + f[k].cap_w + 4), y: f[k].y, w: 50, h: G.xs.h }
-      }
-      const vo2Box = label('vo2', 22)
-      const hrvBox = label('hrv', 40)
-      const vo2Run = makeRun('xs', 3, vo2Box.y, NORMAL)
-      if (!sysField('hrv', ['HRV', 'HEART_RATE_VARIABILITY'], hrvBox, 'xs', { unit: 'u_ms' })) {
-        makeImg(hrvBox.x - G.xs.pad, hrvBox.y, img('xs/none.png'), NORMAL)
+      makeImg(f.vo2.icon[0], f.vo2.icon[1], img('icon/vo2.png'), NORMAL)
+      makeImg(f.hrv.icon[0], f.hrv.icon[1], img('icon/hrv.png'), NORMAL)
+      const vo2Run = makeRun('sm', 3, f.vo2.box.y, NORMAL)
+      if (!sysField('hrv', ['HRV', 'HEART_RATE_VARIABILITY'], f.hrv.box, 'sm', { unit: 'u_ms' })) {
+        makeImg(f.hrv.box.x - G.sm.pad, f.hrv.box.y, img('sm/none.png'), NORMAL)
         sources.push('hrv=none')
       }
 
@@ -828,7 +870,7 @@ WatchFace({
         const rec = w && typeof w.fullRecoveryTime === 'number' && w.fullRecoveryTime >= 0 ? w.fullRecoveryTime : null
         recDraw(rec !== null ? toKeys(Math.round(rec)).concat(['u_h']) : ['none'])
         const vo2 = w && typeof w.vo2Max === 'number' && w.vo2Max > 0 ? w.vo2Max : null
-        vo2Run.draw(vo2 !== null ? toKeys(Math.round(vo2)) : ['none'], vo2Box.x)
+        vo2Run.draw(vo2 !== null ? toKeys(Math.round(vo2)) : ['none'], f.vo2.box.x)
         const sl = S.sleep ? safe(() => S.sleep.getInfo()) : undefined
         const score = sl && typeof sl.score === 'number' && sl.score > 0 ? sl.score : null
         sleepDraw(score !== null ? toKeys(score) : ['none'])
@@ -848,11 +890,11 @@ WatchFace({
     step('battery', () => {
       const b = L.batt
       const icon = makeImg(b.cx, b.icon_y, img('icon/batt.png'), NORMAL)
-      const run = makeRun('xs', 4, b.y, NORMAL)
+      const run = makeRun('sm', 4, b.y, NORMAL)
       draw.batt = () => {
         const v = S.batt.getCurrent()
         const keys = typeof v === 'number' && v >= 0 ? toKeys(v + '%') : ['none']
-        const total = b.icon_w + 3 + measure('xs', keys)
+        const total = b.icon_w + 3 + measure('sm', keys)
         const x = b.cx - total / 2
         place(icon, x, b.icon_y)
         run.draw(keys, x + b.icon_w + 3)
