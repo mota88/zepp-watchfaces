@@ -19,14 +19,19 @@ SS = 3                  # supersampling for particles
 # Zepp weather codes (0..28) -> (wash, animation). None = nothing.
 WEATHER_FX = {
     0: ("cloudy", "clouds"), 1: ("rain", "rain_light"), 2: ("snow", "snow_light"), 3: (None, "sun"),
-    4: ("overcast", "clouds"), 5: ("rain", "rain_light"), 6: ("snow", "snow_light"), 7: ("rain", "rain_heavy"),
+    4: ("overcast", "overcast"), 5: ("rain", "rain_light"), 6: ("snow", "snow_light"), 7: ("rain", "rain_heavy"),
     8: ("snow", "snow_heavy"), 9: ("snow", "snow_heavy"), 10: ("rain", "rain_heavy"), 11: ("dust", "dust"),
-    12: ("rain", "sleet"), 13: ("fog", "fog"), 14: ("haze", "fog"), 15: ("storm", "rain_heavy"),
+    12: ("rain", "sleet"), 13: ("fog", "fog"), 14: ("haze", "haze"), 15: ("storm", "rain_heavy"),
     16: ("snow", "snow_heavy"), 17: ("dust", "dust"), 18: ("storm", "rain_heavy"), 19: ("rain", "sleet"),
     20: ("storm", "rain_heavy"), 21: ("storm", "rain_heavy"), 22: ("dust", "dust"), 23: ("dust", "dust"),
     24: ("rain", "rain_heavy"), 25: (None, None), 26: ("cloudy", "clouds"), 27: ("rain", "rain_light"),
     28: (None, "stars"),
 }
+WEATHER_NAMES = ("Cloudy", "Showers", "Snow showers", "Sunny", "Overcast", "Light rain", "Light snow",
+                 "Moderate rain", "Moderate snow", "Heavy snow", "Heavy rain", "Sandstorm", "Rain and snow",
+                 "Fog", "Haze", "Thunderstorm", "Snowstorm", "Floating dust", "Very heavy rainstorm",
+                 "Rain and hail", "Thunderstorm and hail", "Heavy rainstorm", "Dust", "Heavy sandstorm",
+                 "Rainstorm", "Unknown", "Cloudy night", "Showers night", "Clear night")
 # Every few seconds the face shows two "flash" images, one tick each: lightning (bright,
 # then fading) in thunderstorms (their icon shows a bolt), a shooting star on clear nights.
 FLASH_CODES = (15, 20)
@@ -42,14 +47,15 @@ WASHES = {
 }
 PROFILES = {"sky": (1.5, 0.5), "even": (1.15, 0.85), "low": (0.6, 1.4)}  # alpha factor at top, bottom
 TEXTURED = ("fog", "dust")          # washes with drifting-cloud texture instead of a flat tint
-ANIMS = ("rain_light", "rain_heavy", "sleet", "snow_light", "snow_heavy", "dust", "clouds", "fog", "sun", "stars")
+ANIMS = ("rain_light", "rain_heavy", "sleet", "snow_light", "snow_heavy", "dust", "clouds", "overcast",
+         "fog", "haze", "sun", "stars")
 # Animations that need fewer distinct frames than FRAMES (saves space on the watch):
 # "half" repeats after half a loop (drifts, star twinkle), "swing" plays forward then back.
-REPEAT = {"clouds": "half", "fog": "half", "stars": "half", "sun": "swing"}
+REPEAT = {"clouds": "half", "overcast": "half", "fog": "half", "haze": "half", "stars": "half", "sun": "swing"}
 # Particles fade behind the central text: ellipse centre x, y, radii (px at 466) and the
 # strength left at its middle, per animation (1 = no fade).
 FOCUS = (233, 248, 175, 150)
-FOCUS_KEEP = {"clouds": 0.6, "fog": 0.7, "sun": 0.55}
+FOCUS_KEEP = {"clouds": 0.6, "overcast": 0.7, "fog": 0.7, "haze": 0.8, "sun": 0.55}
 FOCUS_KEEP_DEFAULT = 0.35
 
 RAIN = (205, 218, 236)
@@ -318,7 +324,8 @@ def _drift_frames(rng, w, h, color, travel, density, ramp, stretch, frames, fade
     Two copies half a loop apart cross-fade, each jumping back while it is invisible, so
     the drift never visibly restarts; the result repeats after half a loop."""
     lo, hi, peak = density
-    n = _fractal(rng, w, max(16, int(h / stretch))).resize((w, h), Image.BICUBIC)
+    # made taller, then squeezed to h: features come out wide and flat, like cloud banks
+    n = _fractal(rng, w, int(h * stretch)).resize((w, h), Image.BICUBIC)
 
     def curve(v):
         t = min(1.0, max(0.0, (v / 255 - lo) / (hi - lo)))
@@ -430,8 +437,12 @@ def anim_frames(kind, w, h, fade=None, frames=None):
         out = _dust_frames(rng, w, h, frames, fade)
     elif kind == "clouds":          # a grey veil of cloud drifting right across the upper sky
         out = _drift_frames(rng, w, h, (150, 156, 168), 16, (0.28, 0.72, 120), (0.25, 0.70), 1.6, frames, fade)
+    elif kind == "overcast":        # a thick, darker cloud deck over most of the sky, drifting slowly
+        out = _drift_frames(rng, w, h, (112, 118, 130), 16, (0.10, 0.60, 150), (0.40, 0.85), 2.2, frames, fade)
     elif kind == "fog":             # banks of fog drifting left along the bottom
         out = _drift_frames(rng, w, h, (214, 218, 226), -16, (0.30, 0.85, 120), (0.78, 0.40), 2.6, frames, fade)
+    elif kind == "haze":            # a thin warm veil over everything, drifting left
+        out = _drift_frames(rng, w, h, (226, 206, 172), -16, (0.05, 0.95, 85), (0.0, 1.6), 3.0, frames, fade)
     elif kind == "sun":
         out = _sun_frames(rng, w, h, frames, fade)
     elif kind == "stars":

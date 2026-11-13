@@ -19,6 +19,7 @@ Font: Barlow Condensed (SIL Open Font License), bundled in tools/fonts/.
 import json
 import math
 import os
+import re
 import shutil
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -56,26 +57,64 @@ FONT = os.path.join(HERE, "fonts", "barlow-condensed-latin-%d-normal.woff")
 PHOTOS = os.path.join(REPO, "photos")
 REVIEW_SHEET = os.path.join(PHOTOS, "review_sheet.jpg")   # not in git, like the photos
 TODS = ("dawn", "day", "dusk", "night")
-MOODS = ("clear", "clouds", "rain", "snow", "fog")
 # Background photos: photos/<dawn|day|dusk|night>/ for any weather, and optionally
-# photos/<time of day>/<clear|clouds|rain|snow|fog>/ for photos that match the weather.
-# The face picks from the pool for the current time of day and today's weather, and
-# changes photo every hour. Crop per photo lives in photos/crops.json (see photo_crop).
-# Weather code (0..28) -> mood; codes not listed (sunny, unknown) prefer "clear".
-WEATHER_MOOD = {0: "clouds", 4: "clouds", 26: "clouds",
-                1: "rain", 5: "rain", 7: "rain", 10: "rain", 15: "rain", 18: "rain", 19: "rain",
-                20: "rain", 21: "rain", 24: "rain", 27: "rain",
-                2: "snow", 6: "snow", 8: "snow", 9: "snow", 12: "snow", 16: "snow",
-                13: "fog", 14: "fog", 11: "fog", 17: "fog", 22: "fog", 23: "fog"}
+# photos/<time of day>/<weather>/ for photos that match the weather, one folder per main
+# condition (MOODS). The face picks from the pool for the current time of day and today's
+# weather, and changes photo every hour. Crop per photo lives in photos/crops.json (see
+# photo_crop).
+MOODS = ("clear", "clouds", "overcast", "rain", "storm", "snow", "sleet", "fog", "haze", "dust")
+# Weather code (0..28) -> folder; codes not listed (sunny, clear night, unknown) use "clear".
+# Storms are the codes with the dark storm tint (thunderstorms and heavy rainstorms).
+WEATHER_MOOD = {0: "clouds", 26: "clouds", 4: "overcast",
+                1: "rain", 5: "rain", 7: "rain", 10: "rain", 24: "rain", 27: "rain",
+                15: "storm", 18: "storm", 20: "storm", 21: "storm",
+                2: "snow", 6: "snow", 8: "snow", 9: "snow", 16: "snow",
+                12: "sleet", 19: "sleet",
+                13: "fog", 14: "haze", 11: "dust", 17: "dust", 22: "dust", 23: "dust"}
+# Where to look when a folder has no photos (for this time of day, or for its twin: dawn
+# and dusk share photos), in order; "any" is the time of day's own folder.
+MOOD_FALLBACK = {
+    "clear": ("any", "clouds"),
+    "clouds": ("overcast", "any", "clear"),
+    "overcast": ("clouds", "any", "fog", "rain"),
+    "rain": ("storm", "any", "overcast", "clouds"),
+    "storm": ("rain", "any", "overcast", "clouds"),
+    "snow": ("sleet", "any", "overcast", "clouds"),
+    "sleet": ("snow", "rain", "any", "overcast", "clouds"),
+    "fog": ("haze", "any", "overcast", "clouds"),
+    "haze": ("fog", "dust", "any", "clouds", "clear"),
+    "dust": ("haze", "fog", "any", "clear"),
+}
 PHOTO_CROP_DEFAULT = {"x": 0.5, "y": 0.5, "zoom": 1.0, "ev": 0.0}
 # Used to work out sunrise/sunset when the watch gives no sun times (Madrid).
 HOME = {"lat": 40.4168, "lon": -3.7038}
 FX_H = H                        # height of the weather animation layer (from the top)
-# Review mode: the face shows every photo (including photos/unused/): tap the time for
-# the next one, with its name shown at the top, so you can pick which ones to keep.
-# A contact sheet of all of them is written to photos/review_sheet.jpg.
-# Set to False for the final version.
-REVIEW = True
+# Review mode, to check photos on the watch: tap the time for the next photo (every photo
+# in the pools, plus any other folder under photos/ except unused/), each shown with weather
+# that matches its folder, whatever the real weather, with its name and the condition at
+# the top. Off for normal use. Either way, a contact sheet of the same list is written to
+# photos/review_sheet.jpg (not in git) to check photos without installing.
+REVIEW = False
+REVIEW_SKIP = ("unused",)
+# Review: the conditions the photos of each folder take turns through (by day, at night).
+# Photos straight in a time-of-day folder (any weather) take the conditions that would
+# fall back to them.
+REVIEW_WEATHER = {
+    "clear": ([3], [28]),
+    "clouds": ([0], [26]),
+    "overcast": ([4], [4]),
+    "rain": ([5, 10, 1], [27, 10, 7]),
+    "storm": ([15, 21, 20], [15, 21, 20]),
+    "snow": ([6, 9, 16], [6, 9, 16]),
+    "sleet": ([12, 19], [12, 19]),
+    "fog": ([13], [13]),
+    "haze": ([14], [14]),
+    "dust": ([11, 22, 17], [11, 22, 17]),
+}
+# ... and these are each shown at least once: sunny, clear night, cloudy, overcast, light and
+# heavy rain, thunderstorm, light and heavy snow, sleet, fog, haze, sandstorm
+REVIEW_MAIN = (3, 28, 0, 4, 5, 10, 15, 6, 9, 12, 13, 14, 11)
+NIGHT_CODES = (26, 27, 28)
 
 COLORS = {
     # values are white; coral is the one text accent (weekday, seconds); the metric
@@ -273,6 +312,54 @@ def load_photo(path, crop):
                            PHOTO_MAX_MEAN, crop["ev"])
 
 
+def short_name(name):
+    """A photo's name for the review label: Unsplash downloads lose their photo id."""
+    return re.sub(r"-[A-Za-z0-9_-]{11}-unsplash$", "", name)
+
+
+def bg_options(pool, tod, mood):
+    """The (time of day, folder) pairs the face picks a photo from for this weather, as in
+    index.js: the folder or the first of its fallbacks with photos, for this time of day or
+    its twin (dawn and dusk share photos), else whatever this time of day has."""
+    twin = {"dawn": "dusk", "dusk": "dawn"}.get(tod)
+    for m in (mood,) + MOOD_FALLBACK[mood]:
+        opts = [(t, m) for t in (tod, twin) if t and pool.get(t, {}).get(m)]
+        if opts:
+            return opts
+    return [(tod, next(iter(pool[tod])))]
+
+
+def review_weather(entries, pool):
+    """Review list [bg, folder, "name - condition", weather code] from [bg, folder, name,
+    time of day, mood]: photos of a folder take turns through its REVIEW_WEATHER conditions
+    (photos for any weather through those of the folders that fall back to them), then one
+    more entry for each of REVIEW_MAIN not shown yet, on a photo the face would pick for it."""
+    turn, out = {}, []
+    for bg, folder, name, tod, mood in entries:
+        night = tod == "night"
+        if mood in REVIEW_WEATHER:
+            codes = REVIEW_WEATHER[mood][night]
+        else:
+            uses = [m for m in MOODS if (tod, mood) in bg_options(pool, tod, m)] or list(MOODS)
+            codes = [c for m in uses for c in REVIEW_WEATHER[m][night]]
+        k = turn.get((tod, mood), 0)
+        turn[(tod, mood)] = k + 1
+        out.append([bg, folder, name, codes[k % len(codes)]])
+    for code in REVIEW_MAIN:
+        if not entries or any(e[3] == code for e in out):
+            continue
+        mood = WEATHER_MOOD.get(code, "clear")
+        pick = None
+        for tod in ("night",) if code in NIGHT_CODES else ("day", "dusk", "dawn", "night"):
+            opts = bg_options(pool, tod, mood)
+            pick = next((e for e in entries if (e[3], e[4]) in opts), None)
+            if pick:
+                break
+        pick = pick or entries[0]
+        out.append([pick[0], pick[1], pick[2], code])
+    return [[bg, folder, "%s - %s" % (name, fx.WEATHER_NAMES[code]), code] for bg, folder, name, code in out]
+
+
 # ---------------------------------------------------------------- main ------
 def bezel_letter(text, size, color, disc=None):
     s = size * 4
@@ -330,14 +417,14 @@ def main():
             for i, f in enumerate(files):
                 out = "bg/%s_%s_%d.png" % (t, mood, i)
                 add_photo(os.path.join(folder, sub + f), t + "/" + sub + f, out)
-                review.append([out, "%s/%s%s" % (t, sub, f.rsplit(".", 1)[0])])
+                review.append([out, t + ("/" + mood if sub else ""), short_name(f.rsplit(".", 1)[0]), t, mood])
             pool[t][mood] = len(files)
     if REVIEW:
-        # every other photo under photos/ (any folder, e.g. review/ or unused/)
+        # every other photo under photos/ (any folder except the ones skipped)
         extra = []
         for dirpath, _, names in os.walk(PHOTOS):
             relp = os.path.relpath(dirpath, PHOTOS)
-            if relp.split(os.sep)[0] in TODS:
+            if relp.split(os.sep)[0] in TODS + REVIEW_SKIP:
                 continue
             for f in names:
                 p = os.path.join(dirpath, f)
@@ -345,7 +432,9 @@ def main():
                     extra.append(os.path.join(relp, f) if relp != "." else f)
         for i, rp in enumerate(sorted(extra)):
             add_photo(os.path.join(PHOTOS, rp), rp.replace(os.sep, "/"), "bg/review_%d.png" % i)
-            review.append(["bg/review_%d.png" % i, rp.replace(os.sep, "/").rsplit(".", 1)[0]])
+            folder, name = os.path.split(rp.replace(os.sep, "/").rsplit(".", 1)[0])
+            review.append(["bg/review_%d.png" % i, folder or ".", short_name(name), "day", "any"])
+    review = review_weather(review, pool)      # also for the contact sheet when REVIEW is off
 
     # -- weather: tints, looping animations and flashes, chosen by weather code ----------
     fx_fade = (FX_H - 50, FX_H) if FX_H < H else None
@@ -436,6 +525,7 @@ def main():
     g = {n: s.meta() for n, s in sets.items()}
     L = {"W": W, "bg_h": BG_H, "fx_h": FX_H, "g": g, "bgpool": pool, "home": HOME,
          "moods": [WEATHER_MOOD.get(code, "clear") for code in range(29)],
+         "mood_chain": {m: [m] + list(MOOD_FALLBACK[m]) for m in MOODS},
          "review": review if REVIEW and review else None,   # no photos (fresh clone): normal mode
          "fx": {"wash": fx_wash, "frames": fx_frames, "flash": fx_flash, "tick": fx.TICK_MS}}
 
@@ -583,8 +673,8 @@ def main():
 
     import preview
     preview.render_all(ROOT, L)
-    if L["review"]:
-        preview.render_sheet(ROOT, L, REVIEW_SHEET, photo_info)
+    if review:
+        preview.render_sheet(ROOT, L, REVIEW_SHEET, review, photo_info)
         print("review sheet: %s" % os.path.relpath(REVIEW_SHEET, REPO))
     print("assets, layout.js and previews written")
 

@@ -167,26 +167,25 @@ def finish(im):
     return out
 
 
-def render_sheet(root, L, path, info=None, cols=8, cell=233):
-    """Contact sheet: every photo of L["review"] under the face, numbered like the watch's
-    review mode, to choose and crop photos without installing. Shows your photos, so it
-    is written next to them (photos/ is not in git)."""
+def render_sheet(root, L, path, rv, info=None, cols=8, cell=233):
+    """Contact sheet: every photo of the review list `rv` ([bg, folder, label, weather code])
+    under the face with that weather, numbered like the watch's review mode, to check photos
+    and crops without installing. Shows your photos, so it is written next to them
+    (photos/ is not in git)."""
     from PIL import ImageFont
-    rv = L["review"]
     lab = 32
     rows = (len(rv) + cols - 1) // cols
     sheet = Image.new("RGB", (cols * (cell + 8) + 8, rows * (cell + lab + 8) + 8), (24, 26, 34))
     d = ImageDraw.Draw(sheet)
     f1, f2 = ImageFont.load_default(13), ImageFont.load_default(11)
-    for i, (bg, name) in enumerate(rv):
-        im = render(root, L, bg=bg, s=dict(SAMPLE, cond=3)).resize((cell, cell), Image.LANCZOS)
+    for i, (bg, folder, name, code) in enumerate(rv):
+        im = render(root, L, bg=bg, s=dict(SAMPLE, cond=code)).resize((cell, cell), Image.LANCZOS)
         x, y = 8 + (i % cols) * (cell + 8), 8 + (i // cols) * (cell + lab + 8)
         sheet.paste(im, (x, y + lab), im)
-        d.text((x, y + 1), "%d  %s" % (i + 1, name), font=f1, fill=(235, 235, 235))
         meta = (info or {}).get(bg)
-        if meta:
-            d.text((x, y + 17), "brightness %.2f   exposure %+.1f EV" % (meta["mean"], meta["ev"]),
-                   font=f2, fill=(150, 150, 150))
+        extra = "   brightness %.2f  %+.1f EV" % (meta["mean"], meta["ev"]) if meta else ""
+        d.text((x, y + 1), "%d  %s%s" % (i + 1, folder, extra), font=f2, fill=(150, 150, 150))
+        d.text((x, y + 15), name, font=f1, fill=(235, 235, 235))
     sheet.save(path, quality=88)
 
 

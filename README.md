@@ -24,8 +24,8 @@ City + data face.
 
 - Background: your photos (or a generated city skyline) for the time of day (dawn, day,
   dusk, night) and today's weather, with full-screen animated weather on top that follows
-  the watch's current weather: rain, sleet, snow, blowing dust, sun rays, drifting clouds
-  and fog, stars with the odd shooting star, lightning in thunderstorms.
+  the watch's current weather: rain, sleet, snow, blowing dust, sun rays, drifting clouds,
+  overcast, fog and haze, stars with the odd shooting star, lightning in thunderstorms.
 - Compass bezel: the ring turns so N points north, with N/E/S/W kept upright (only while
   the screen is on).
 - Weather (condition, temperature, wind, humidity) and altitude, the date with the next
@@ -34,6 +34,8 @@ City + data face.
   sleep score, VO2max, HRV, battery. Values are white, coral is the only text accent, and
   the metric colours are kept to the rings and icons (no text captions).
 - Taps: weather, altitude, steps, HybridCharge, heart rate, sun times, sleep and battery open the matching watch app (IMG_CLICK areas, if the firmware offers them).
+  The time opens the Timer (or Alarms). HRV opens HybridCharge, as there is no HRV screen to
+  open and HRV is one of HybridCharge's inputs (it replaced Readiness on current firmware).
 - Always-on: outlined time and the date on black (about 2% of pixels lit; Zepp's limit is 10%).
 
 `meridian/preview/normal.png`, `variants.png`, `aod.png` and `weather.gif` are rendered from
@@ -67,7 +69,7 @@ tools/icons.py                    icons
 tools/preview.py                  preview renderer (mirrors index.js), photo review sheet
 tools/fonts/                      Barlow Condensed (SIL Open Font License, licence included)
 photos/crops.json                 crop per photo
-photos/review_sheet.jpg           every photo under the face (generated in review mode, not in git)
+photos/review_sheet.jpg           every photo under the face (generated, not in git)
 ```
 
 ### Restyle
@@ -83,11 +85,36 @@ From `meridian/`: `zeus bridge`, then `connect` and `install`; the `[meridian]` 
 ### Background photos and weather
 
 Put photos in `photos/dawn/`, `day/`, `dusk/` and `night/` (any number, any size), and
-photos that match a kind of weather in a subfolder: `photos/night/rain/`, `photos/day/snow/`
-(`clear`, `clouds`, `rain`, `snow`, `fog`). The face picks from the pool for the current time
-of day and today's forecast, and switches every hour: a photo for that weather, else one
-from the time of day's own folder (any weather), else one for that weather from the other
-twilight (dawn and dusk look alike), else whatever that time of day has.
+photos that match a kind of weather in a subfolder, e.g. `photos/night/rain/`. There is one
+subfolder per main condition, and the watch's 29 weather codes map onto them
+(`WEATHER_MOOD` in `tools/gen_assets.py`):
+
+| Folder | Weather codes |
+|---|---|
+| `clear` | sunny, clear night, unknown |
+| `clouds` | cloudy, cloudy night |
+| `overcast` | overcast |
+| `rain` | showers, light, moderate and heavy rain, rainstorm |
+| `storm` | thunderstorms (with or without hail), heavy and very heavy rainstorms |
+| `snow` | snow showers, light, moderate and heavy snow, snowstorm |
+| `sleet` | rain and snow, rain and hail |
+| `fog` | fog |
+| `haze` | haze |
+| `dust` | sandstorms, dust, floating dust |
+
+The photo follows the watch's current weather, like the weather effects and icon. A photo
+layer bound to the weather code holds a photo for each of the 29 codes, rebuilt when the time
+of day or the date changes. Each code gets a photo from its weather's folder, or else from the
+first of its fallbacks that has photos (`MOOD_FALLBACK`: e.g. storm → rain, sleet → snow → rain,
+dust → haze → fog, then the time of day's own folder, then grey skies). At dawn and dusk
+it takes from either folder, as they look alike. If nothing matches, it uses whatever
+that time of day has. Empty folders are fine. Photos in `photos/unused/` are left out.
+
+The photos of each folder come in a fixed shuffled order, and every day each weather moves
+one step along it, so the photo changes daily (when the folder has 2 or more). Weathers that
+share a folder start at different steps, e.g. light and heavy rain, so a change of weather
+brings a different photo. On watches without a current-weather data type, the photo follows
+today's forecast instead.
 Dawn/day/dusk/night come from sunrise and sunset (from the watch, or calculated for `HOME` in
 `tools/gen_assets.py` when the watch gives none).
 
@@ -119,18 +146,24 @@ The photos are not in git: they are large, and even free-licence sites (e.g. Uns
 allow redistributing them as a collection. Without photos, the generator uses the generated
 city skylines.
 
-Review mode (`REVIEW` in `tools/gen_assets.py`) adds the photos from any other folder
-(e.g. `photos/review/`, `photos/unused/`): tap the time to step through them, with each
-photo's name shown at the top. It also writes `photos/review_sheet.jpg`: every photo under the
-face, numbered as on the watch, to choose and crop photos without installing. Every photo
-adds 0.45 MB to the package, so review large sets on the sheet and only a shortlist on the watch.
+`photos/review_sheet.jpg` shows every photo under the face with weather that matches its
+folder, to check photos and crops without installing; the generator rewrites it each run.
+Every photo adds 0.45 MB to the package.
+
+Review mode (`REVIEW` in `tools/gen_assets.py`, off by default) shows the same list on the
+watch: tap the time to step through every photo in the pools (plus any other folder under
+`photos/`, except `photos/unused/`), each with that weather whatever the real weather, and
+the folder, photo name and condition at the top. The photos of a folder take turns through
+its conditions (`REVIEW_WEATHER`), and every main condition is shown at least once
+(`REVIEW_MAIN`).
 
 Weather is drawn on top of the photo, following the watch's current weather code (29 codes):
 a tint (cloudy, overcast, rain, storm, snow, haze; textured for fog and dust) and a
 full-screen looping animation: light/heavy rain, sleet, light/heavy snow, blowing dust,
-sun rays (sunny), stars (clear night), drifting clouds (cloudy, overcast) and fog (fog, haze).
+sun rays (sunny), stars (clear night), drifting clouds (cloudy), a cloud deck (overcast),
+fog banks (fog) and a warm veil (haze).
 Every few seconds thunderstorms add a lightning flash and clear nights a shooting star.
 Particles fade behind the central text (`FOCUS` in `tools/fx.py`) and stay strong at the edges.
-Loops are seamless (8 frames, `FRAMES` and `TICK_MS` in `tools/fx.py`; about 17 MB on the
+Loops are seamless (8 frames, `FRAMES` and `TICK_MS` in `tools/fx.py`; about 20 MB on the
 watch in total). The mapping is `WEATHER_FX` in `tools/fx.py`. Re-run
 `python3 tools/gen_assets.py` after changes.

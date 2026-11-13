@@ -185,12 +185,15 @@ function sysField(label, names, box, set, opts) {
 
 // ---- taps --------------------------------------------------------------------------------
 // Created last so they sit on top. First choice: IMG_CLICK bound to a data type (the
-// watch opens the matching app). Otherwise: a transparent BUTTON that launches a system app.
+// watch opens the matching app). Otherwise: a transparent BUTTON that launches a system
+// app: the first of `appKeys` (one key or a list) that this firmware has.
 const taps = []
 const tapSpecs = []
-function tapApp(name, names, appKey, url, fn) {
-  tapSpecs.push([name, names, appKey, url, fn])
+function tapApp(name, names, appKeys, url, fn) {
+  tapSpecs.push([name, names, appKeys, url, fn])
 }
+// HybridCharge (it replaced BioCharge and Readiness), under the names firmwares use
+const CHARGE_TYPES = ['HYBRID_CHARGE', 'HYBRIDCHARGE', 'BIO_CHARGE', 'BIOCHARGE', 'BODY_BATTERY', 'READINESS']
 // Open a system app. Some apps (Compass) only open properly by their screen name,
 // which is how older watch faces do it; others by the system app id.
 function openApp(appKey, url) {
@@ -219,28 +222,28 @@ function createTaps() {
       const ok = safe(() => ui.createWidget(W.IMG_CLICK, lvl({ x: r[0], y: r[1], w: r[2], h: r[3], src: src, type: dt.id }, NORMAL)))
       if (ok) return taps.push(name + ':click:' + dt.name)
     }
-    const app = t[2] ? router[t[2]] : undefined
-    if (app !== undefined && W.BUTTON !== undefined) {
+    const key = [].concat(t[2] || []).filter((k) => router[k] !== undefined)[0]
+    if (key && W.BUTTON !== undefined) {
       const ok = safe(() =>
         ui.createWidget(W.BUTTON, lvl({
           x: r[0], y: r[1], w: r[2], h: r[3], normal_src: src, press_src: src,
           click_func: () => {
             try {
-              openApp(t[2], t[3])
+              openApp(key, t[3])
             } catch (e) {
-              log('launch ' + t[2] + ' failed: ' + e)
+              log('launch ' + key + ' failed: ' + e)
             }
           },
         }, NORMAL))
       )
-      return taps.push(name + (ok ? ':button:' + t[2].replace('SYSTEM_APP_', '') + (t[3] ? '/' + t[3] : '') : ':button-failed'))
+      return taps.push(name + (ok ? ':button:' + key.replace('SYSTEM_APP_', '') + (t[3] ? '/' + t[3] : '') : ':button-failed'))
     }
     taps.push(name + ':none')
   })
 }
 
 // ---- weather helpers ------------------------------------------------------------------
-const st = { forecast: null, tide: null }
+const st = { forecast: null, tide: null, reviewIdx: 0 }
 const S = {}
 const draw = {}
 const listeners = []
@@ -301,6 +304,52 @@ function forecastCode() {
   const f = st.forecast
   if (!(f && f.index >= 0 && f.index <= 28)) return 25
   return st.tod === 'night' && NIGHT_CODE[f.index] !== undefined ? NIGHT_CODE[f.index] : f.index
+}
+// The weather drawn by the JS layers: in review mode the one chosen for the photo on show
+// (whatever the real weather), otherwise today's forecast.
+const weatherCode = () => (L.review ? L.review[st.reviewIdx % L.review.length][3] : forecastCode())
+
+// ---- background photos ---------------------------------------------------------------
+// Each weather code gets a photo from its folder (or the first of its fallbacks with
+// photos, L.mood_chain; dawn and dusk share theirs). Every folder's photos come in a
+// fixed shuffled order and each day every code moves one step along it, so the photo
+// changes daily, and weathers that share a folder (light and heavy rain) start at
+// different steps, so a change of weather brings a different photo.
+const bgPath = (tod, mood, i) => 'bg/' + tod + '_' + mood + '_' + i + '.png'
+const today = () => Math.floor(Date.UTC(S.time.getFullYear(), S.time.getMonth() - 1, S.time.getDate()) / 86400000)
+const moodCodes = {}
+L.moods.forEach((m, code) => (moodCodes[m] = moodCodes[m] || []).push(code))
+const photoOrders = {}
+function photoOrder(tod, mood) {
+  const id = tod + '/' + mood
+  if (photoOrders[id]) return photoOrders[id]
+  const chain = L.mood_chain[mood]
+  const twin = tod === 'dawn' ? 'dusk' : tod === 'dusk' ? 'dawn' : null
+  const list = []
+  const add = (t, m) => {
+    for (let i = 0; t && i < (L.bgpool[t][m] || 0); i++) list.push(bgPath(t, m, i))
+  }
+  for (let k = 0; k < chain.length && !list.length; k++) {
+    add(tod, chain[k])
+    add(twin, chain[k])
+  }
+  if (!list.length) add(tod, Object.keys(L.bgpool[tod])[0])
+  // shuffle with a fixed seed per folder (FNV-1a hash of its name, then an LCG)
+  let s = 2166136261
+  for (let i = 0; i < id.length; i++) s = Math.imul(s ^ id.charCodeAt(i), 16777619) >>> 0
+  for (let i = list.length - 1; i > 0; i--) {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0
+    const j = Math.floor((s / 4294967296) * (i + 1))
+    const x = list[i]
+    list[i] = list[j]
+    list[j] = x
+  }
+  return (photoOrders[id] = list)
+}
+function photoFor(tod, code, day) {
+  const mood = L.moods[code]
+  const order = photoOrder(tod, mood)
+  return order[(day + moodCodes[mood].indexOf(code)) % order.length]
 }
 const pad2 = (n) => (n < 10 ? '0' : '') + n
 const fmtHM = (m) => pad2(Math.floor(m / 60)) + ':' + pad2(m % 60)
@@ -387,6 +436,12 @@ function fxStop() {
   fxTimer = null
   fx.flashes.forEach((f) => safe(() => show(f, false)))
 }
+// review mode: after changing photo, show its flash (lightning, shooting star) soon
+function fxFlashSoon() {
+  fx.flashes.forEach((f) => safe(() => show(f, false)))
+  fx.flashStep = fx.flashes.length + 1
+  fx.flashWait = fxTicks(700)
+}
 function wake() {
   readWeather()
   refreshAll()
@@ -460,62 +515,66 @@ WatchFace({
     readWeather()
     chunked('forecast', json(safe(() => S.weather.getForecastWeather())))
 
-    // -- background photo (pool per time of day and weather) + weather wash and animation ---
+    // -- background photo (for the time of day and the weather) + weather wash and animation --
     step('background', () => {
       ui.createWidget(W.FILL_RECT, lvl({ x: 0, y: 0, w: L.W, h: L.W, color: 0x000000 }, BOTH))
-      const bgPath = (tod, mood, i) => 'bg/' + tod + '_' + mood + '_' + i + '.png'
-      const bg = makeImg(0, 0, img(bgPath('day', Object.keys(L.bgpool.day)[0], 0)), NORMAL)
-      st.reviewIdx = 0
-      let reviewLabel = null
-      if (L.review) {
-        ui.createWidget(W.FILL_RECT, lvl({ x: 93, y: 18, w: L.W - 186, h: 24, radius: 12, color: 0x000000 }, NORMAL))
-        reviewLabel = ui.createWidget(W.TEXT, lvl({ x: 93, y: 19, w: L.W - 186, h: 22, text: '', color: 0xffffff, text_size: 15,
-          align_h: ui.align ? ui.align.CENTER_H : undefined }, NORMAL))
-      }
-      // Photo for the time of day and today's weather: one that matches the weather,
-      // else one for any weather, else a matching one from the other twilight (dawn and
-      // dusk look alike), else whatever this time of day has.
-      const pickBg = (tod) => {
-        const code = st.forecast && st.forecast.index >= 0 && st.forecast.index <= 28 ? st.forecast.index : 3
-        const mood = L.moods[code]
-        const twin = tod === 'dawn' ? 'dusk' : tod === 'dusk' ? 'dawn' : null
-        const p = L.bgpool[tod]
-        let t = tod
-        let m = p[mood] ? mood : p.any ? 'any' : null
-        if (!m && twin && L.bgpool[twin][mood]) {
-          t = twin
-          m = mood
-        }
-        if (!m) m = Object.keys(p)[0]
-        // a different photo from the pool every hour (stable within the hour)
-        const seed = S.time.getDate() * 31 + S.time.getHours() * 7 + S.time.getMonth()
-        return bgPath(t, m, ((seed * 2654435761) % 4294967296) % L.bgpool[t][m])
+      const t = dataType(['WEATHER_CURRENT', 'WEATHER'])
+      // Everything in this group is drawn under the rest of the face, even widgets created
+      // later: the photo layer is rebuilt as the time of day and the date change.
+      const group = W.GROUP !== undefined ? safe(() => ui.createWidget(W.GROUP, lvl({ x: 0, y: 0, w: L.W, h: L.W }, NORMAL))) : null
+      // Preferred: an IMG_LEVEL bound to the watch's current weather, like the weather
+      // effects and icon, holding the photo for every weather code. Otherwise (and in review
+      // mode) a plain image that JS points at the photo for weatherCode(). That one is made
+      // now, so that it is under the rest of the face whenever it is needed.
+      let sysPhoto = !!(group && t && W.IMG_LEVEL !== undefined && !L.review)
+      const o = lvl({ x: 0, y: 0, w: L.W, h: L.W, src: img('click.png') }, NORMAL)
+      const photo = (group && safe(() => group.createWidget(W.IMG, o))) || ui.createWidget(W.IMG, o)
+      if (!photo) throw new Error('background image: createWidget returned ' + photo)
+      show(photo, !sysPhoto)
+      let layer = null
+      let layerKey = null
+      const setLayer = (tod, day) => {
+        const key = tod + day
+        if (key === layerKey) return true
+        const arr = []
+        for (let code = 0; code < 29; code++) arr.push(img(photoFor(tod, code, day)))
+        const w = safe(() => group.createWidget(W.IMG_LEVEL, lvl({ x: 0, y: 0, w: L.W, h: L.W, image_array: arr, image_length: 29, type: t.id }, NORMAL)))
+        if (!w) return false
+        // the new layer is drawn over the old one, so remove the old one afterwards
+        const old = layer
+        if (old && !safe(() => (ui.deleteWidget(old), true))) safe(() => show(old, false))
+        layer = w
+        layerKey = key
+        return true
       }
       draw.sky = () => {
-        const t = nowMin()
+        const now = nowMin()
         const sun = sunTimes()
         let tod = 'day'
-        if (Math.abs(t - sun.sr) <= 45) tod = 'dawn'
-        else if (Math.abs(t - sun.ss) <= 45) tod = 'dusk'
-        else if (t < sun.sr || t > sun.ss) tod = 'night'
+        if (Math.abs(now - sun.sr) <= 45) tod = 'dawn'
+        else if (Math.abs(now - sun.ss) <= 45) tod = 'dusk'
+        else if (now < sun.sr || now > sun.ss) tod = 'night'
         st.tod = tod
-        if (L.review) {
-          // review mode: tap the time for the next photo; its name is shown at the top
-          const i = st.reviewIdx % L.review.length
-          setSrc(bg, img(L.review[i][0]))
-          if (reviewLabel) safe(() => reviewLabel.setProperty(ui.prop.TEXT, (i + 1) + '/' + L.review.length + '  ' + L.review[i][1]))
-          return
+        if (sysPhoto) {
+          if (setLayer(tod, today())) return
+          sysPhoto = false
+          log('photo layer failed, the photo follows the forecast')
+          if (layer) safe(() => show(layer, false))
+          show(photo, true)
         }
-        setSrc(bg, img(pickBg(tod)))
+        // review mode: the photo picked by tapping the time (see the review label)
+        setSrc(photo, img(L.review ? L.review[st.reviewIdx % L.review.length][0] : photoFor(tod, weatherCode(), today())))
+        if (draw.reviewLabel) safe(draw.reviewLabel)
       }
       draw.sky()
+      sources.push('photo=' + (sysPhoto ? 'sys:' + t.name : L.review ? 'js:review' : 'js:forecast') + (group ? '' : ' (no group)'))
 
       // Weather layers follow the watch's own current weather (IMG_LEVEL bound to the
-      // weather code) so they need no JS weather access. Fallback: today's forecast.
-      const t = dataType(['WEATHER_CURRENT', 'WEATHER'])
+      // weather code, `t` above) so they need no JS weather access. Fallback, and review
+      // mode: drawn by JS for weatherCode().
       const paths = (arr) => arr.map((p) => img(p))
       let sys = false
-      if (W.IMG_LEVEL !== undefined && t) {
+      if (W.IMG_LEVEL !== undefined && t && !L.review) {
         const mk = (arr, h) => safe(() => ui.createWidget(W.IMG_LEVEL, lvl({ x: 0, y: 0, w: L.W, h: h, image_array: paths(arr), image_length: arr.length, type: t.id }, NORMAL)))
         const wash = mk(L.fx.wash, L.bg_h)
         const frames = L.fx.frames.map((arr) => mk(arr, L.fx_h))
@@ -540,13 +599,13 @@ WatchFace({
         frames.forEach((f, k) => k > 0 && show(f, false))
         flashes.forEach((f) => show(f, false))
         draw.fx = () => {
-          const code = forecastCode()
+          const code = weatherCode()
           setSrc(wash, img(L.fx.wash[code]))
           flashes.forEach((f, k) => setSrc(f, img(L.fx.flash[k][code])))
           frames.forEach((f, k) => setSrc(f, img(L.fx.frames[k][code])))
         }
         draw.fx()
-        sources.push('weatherfx=' + (st.forecast ? 'js:forecast' : 'none'))
+        sources.push('weatherfx=' + (L.review ? 'js:review' : st.forecast ? 'js:forecast' : 'none'))
       }
     })
 
@@ -630,7 +689,8 @@ WatchFace({
       let condJs = true
       let cond = null
       const t = dataType(['WEATHER_CURRENT', 'WEATHER'])
-      if (W.IMG_LEVEL !== undefined && t) {
+      // review mode: the icon follows the weather chosen for the photo, so JS draws it
+      if (W.IMG_LEVEL !== undefined && t && !L.review) {
         const arr = []
         for (let i = 0; i < 29; i++) arr.push(img('icon/weather/' + i + '.png'))
         cond = safe(() => ui.createWidget(W.IMG_LEVEL, lvl({ x: w.cond.icon[0], y: w.cond.icon[1], image_array: arr, image_length: 29, type: t.id }, NORMAL)))
@@ -674,7 +734,7 @@ WatchFace({
 
       draw.weather = () => {
         const f = st.forecast
-        if (condJs) setSrc(cond, img('icon/weather/' + forecastCode() + '.png'))
+        if (condJs) setSrc(cond, img('icon/weather/' + weatherCode() + '.png'))
         if (tempRun) {
           if (f && typeof f.low === 'number' && typeof f.high === 'number') tempRun.draw(toKeys(f.low + '/' + f.high + '°'), w.cond.box.x)
           else tempRun.draw(['none'], w.cond.box.x)
@@ -741,12 +801,13 @@ WatchFace({
       }
       draw.secs()
       if (L.review) {
-        // review mode: tap the time to show the next photo
+        // review mode: tap the time for the next photo, shown with the weather chosen for it
         tapApp('time', null, null, null, () => {
           st.reviewIdx++
-          if (draw.sky) safe(draw.sky)
+          ;['sky', 'fx', 'weather'].forEach((k) => draw[k] && safe(draw[k]))
+          fxFlashSoon()
         })
-      } else tapApp('time', ['ALARM_CLOCK', 'ALARM'], 'SYSTEM_APP_ALARM') // tap the time: open Alarms
+      } else tapApp('time', null, ['SYSTEM_APP_COUNTDOWN', 'SYSTEM_APP_ALARM']) // tap the time: open the Timer
     })
 
     // -- ring gauges: steps (JS) and HybridCharge (system) ----------------------------------------
@@ -786,18 +847,17 @@ WatchFace({
       tapApp('steps', ['STEP'], null)
 
       const c = L.gauges.charge
-      const chargeNames = ['HYBRID_CHARGE', 'HYBRIDCHARGE', 'BIO_CHARGE', 'BIOCHARGE', 'BODY_BATTERY', 'READINESS']
-      if (!sysField('hybridcharge', chargeNames, c.box, 'gn', { center: true })) {
+      if (!sysField('hybridcharge', CHARGE_TYPES, c.box, 'gn', { center: true })) {
         centredRun('gn', c.box, 2, NORMAL)(['none'])
         sources.push('hybridcharge=none')
       }
       // ring fill bound to the same data type, if the watch offers ARC_PROGRESS
-      const ct = dataType(chargeNames)
+      const ct = dataType(CHARGE_TYPES)
       if (ct && W.ARC_PROGRESS !== undefined) {
         const ok = safe(() => ui.createWidget(W.ARC_PROGRESS, lvl({ center_x: c.cx, center_y: c.cy, radius: c.r - c.w / 2, start_angle: -90, end_angle: 270, line_width: c.w, color: gc.charge, type: ct.id }, NORMAL)))
         sources.push('hybridring=' + (ok ? 'sys' : 'failed'))
       }
-      tapApp('charge', chargeNames, 'SYSTEM_APP_READINESS')
+      tapApp('charge', CHARGE_TYPES, 'SYSTEM_APP_READINESS')
     })
 
     // -- heart rate --------------------------------------------------------------------------
@@ -881,9 +941,9 @@ WatchFace({
       tapApp('recovery', ['RECOVERY_TIME', 'RECOVERY', 'TRAINING_LOAD'], 'SYSTEM_APP_SPORT_STATUS')
       tapApp('sleep', ['SLEEP'], 'SYSTEM_APP_SLEEP')
       tapApp('vo2', ['VO2MAX', 'VO2_MAX'], 'SYSTEM_APP_SPORT_STATUS')
-      // No system app id for an HRV screen: the HRV data-type tap and Readiness do
-      // nothing on this watch. Stress is the closest HRV-based screen that opens.
-      tapApp('hrv', null, 'SYSTEM_APP_PRESSURE')
+      // There is no HRV screen to open: on current firmware HRV is part of HybridCharge
+      // (which replaced Readiness), so open that, as the HybridCharge ring does.
+      tapApp('hrv', CHARGE_TYPES, 'SYSTEM_APP_HR')
     })
 
     // -- battery ------------------------------------------------------------------------------------
@@ -924,6 +984,24 @@ WatchFace({
       secondsStart()
       fxStart()
     })
+
+    // -- review mode: which photo and weather are on show, on top of everything ---------------
+    if (L.review) {
+      step('review label', () => {
+        // two short lines: the top of a round screen is narrow
+        ui.createWidget(W.FILL_RECT, lvl({ x: CX - 125, y: 12, w: 250, h: 38, radius: 12, color: 0x000000 }, NORMAL))
+        const line = (y) => ui.createWidget(W.TEXT, lvl({ x: CX - 125, y: y, w: 250, h: 18, text: '', color: 0xffffff, text_size: 14,
+          align_h: ui.align ? ui.align.CENTER_H : undefined }, NORMAL))
+        const top = line(13)
+        const bottom = line(30)
+        draw.reviewLabel = () => {
+          const i = st.reviewIdx % L.review.length
+          top.setProperty(ui.prop.TEXT, i + 1 + '/' + L.review.length + '  ' + L.review[i][1])
+          bottom.setProperty(ui.prop.TEXT, L.review[i][2])
+        }
+        draw.reviewLabel()
+      })
+    }
 
     step('taps', createTaps)
     log('sources: ' + sources.join(' '))
