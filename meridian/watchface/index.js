@@ -16,6 +16,7 @@
 import * as uiNs from '@zos/ui'
 import * as sensorNs from '@zos/sensor'
 import * as routerNs from '@zos/router'
+import * as settingsNs from '@zos/settings'
 import { L } from './layout'
 
 // Shows a diagnostics panel over the face after install (tap it to close).
@@ -26,6 +27,7 @@ const DEBUG = false
 const ui = uiNs.default || uiNs
 const sensor = sensorNs.default || sensorNs
 const router = routerNs.default || routerNs
+const settings = settingsNs.default || settingsNs
 const W = ui.widget
 const DT = ui.data_type || {}
 const G = L.g
@@ -127,11 +129,13 @@ function makeRun(set, max, y, level) {
     cells.push(c)
   }
   return {
-    draw(keys, x) {
+    // `folder`: the same glyphs in another colour (a set with the same metrics, e.g. 'bw')
+    draw(keys, x, folder) {
+      folder = folder || set
       let cx = x - G[set].pad
       for (let i = 0; i < max; i++) {
         if (i < keys.length) {
-          place(cells[i], cx, y, img(set + '/' + keys[i] + '.png'))
+          place(cells[i], cx, y, img(folder + '/' + keys[i] + '.png'))
           show(cells[i], true)
           cx += G[set].w[keys[i]]
         } else {
@@ -350,6 +354,28 @@ function photoFor(tod, code, day) {
   const mood = L.moods[code]
   const order = photoOrder(tod, mood)
   return order[(day + moodCodes[mood].indexOf(code)) % order.length]
+}
+
+// ---- date names in the watch's language ----------------------------------------------
+// L.dates holds the weekday and month names and the date row's positions per language;
+// L.langs maps the watch's language codes to them. Other languages show English.
+let dateNamesCache = null
+function dateNames() {
+  if (!dateNamesCache) {
+    const code = safe(() => settings.getLanguage())
+    const lang = (L.langs && L.langs[code]) || 'en'
+    dateNamesCache = L.dates[lang] || L.dates.en
+    sources.push('lang=' + lang + (code === undefined ? '' : '(' + code + ')'))
+  }
+  return dateNamesCache
+}
+// The watch's 12/24-hour setting (API 2.1+); 24-hour if this firmware can't tell
+function is12h() {
+  const f = safe(() => S.time.getHourFormat())
+  if (typeof f === 'number' && sensor.TIME_HOUR_FORMAT_12 !== undefined) return f === sensor.TIME_HOUR_FORMAT_12
+  const g = safe(() => settings.getTimeFormat())
+  if (typeof g === 'number' && settings.TIME_FORMAT_12 !== undefined) return g === settings.TIME_FORMAT_12
+  return false
 }
 const pad2 = (n) => (n < 10 ? '0' : '') + n
 const fmtHM = (m) => pad2(Math.floor(m / 60)) + ':' + pad2(m % 60)
@@ -747,47 +773,61 @@ WatchFace({
 
     // -- date (always-on: its own copy, centred, as the sun event isn't shown there) -----------
     step('date', () => {
+      const N = dateNames()
       const row = (d, level) => ({
-        wk: makeImg(d.wk[0], d.wk[1], img('sm/wk0.png'), level),
+        wk: makeImg(d.wk[0], d.wk[1], img('sm/' + N.wk[0] + '.png'), level),
         d1: makeImg(d.dd[0], d.dd[1], img('sm/0.png'), level),
         d2: makeImg(d.dd[0] + G.sm.w['0'], d.dd[1], img('sm/0.png'), level),
-        mo: makeImg(d.mo[0], d.mo[1], img('sm/mo0.png'), level),
+        mo: makeImg(d.mo[0], d.mo[1], img('sm/' + N.mo[0] + '.png'), level),
       })
-      const rows = AOD !== undefined ? [row(L.date, NORMAL), row(L.date_aod, AOD)] : [row(L.date, BOTH)]
+      const rows = AOD !== undefined ? [row(N.date, NORMAL), row(N.aod, AOD)] : [row(N.date, BOTH)]
       draw.date = () => {
         const dd = pad2(S.time.getDate())
         rows.forEach((r) => {
-          setSrc(r.wk, img('sm/wk' + ((S.time.getDay() + 6) % 7) + '.png'))
+          setSrc(r.wk, img('sm/' + N.wk[(S.time.getDay() + 6) % 7] + '.png'))
           setSrc(r.d1, img('sm/' + dd[0] + '.png'))
           setSrc(r.d2, img('sm/' + dd[1] + '.png'))
-          setSrc(r.mo, img('sm/mo' + (((S.time.getMonth() - 1) % 12 + 12) % 12) + '.png'))
+          setSrc(r.mo, img('sm/' + N.mo[(((S.time.getMonth() - 1) % 12) + 12) % 12] + '.png'))
         })
       }
       draw.date()
     })
 
-    // -- time: HH:MM + seconds; always-on HH:MM -----------------------------------------------
+    // -- time: HH:MM + seconds; always-on HH:MM. 12-hour clock (the watch's own setting):
+    // no leading zero, with the row moved to stay centred, and AM/PM -----------------------
     step('time', () => {
       const t = L.time
-      const rows = [{ folder: 'time', cells: t.x.map((x) => makeImg(x, t.y, img('time/0.png'), NORMAL)) }]
-      makeImg(t.colon, t.y, img('time/colon.png'), NORMAL)
-      if (AOD !== undefined) {
-        const a = L.aod
-        rows.push({ folder: 'aod', cells: a.x.map((x) => makeImg(x, a.y, img('aod/0.png'), AOD)) })
-        makeImg(a.colon, a.y, img('aod/colon.png'), AOD)
-      }
+      const row = (a, folder, level) => ({
+        a: a,
+        folder: folder,
+        cells: a.x.map((x) => makeImg(x, a.y, img(folder + '/0.png'), level)),
+        colon: makeImg(a.colon, a.y, img(folder + '/colon.png'), level),
+        ampm: makeImg(a.ampm[0], a.ampm[1], img('sm/am.png'), level),
+      })
+      const rows = [row(t, 'time', NORMAL)]
+      if (AOD !== undefined) rows.push(row(L.aod, 'aod', AOD))
+      const s1 = makeImg(t.sec.x[0], t.sec.y, img('sec/0.png'), NORMAL)
+      const s2 = makeImg(t.sec.x[1], t.sec.y, img('sec/0.png'), NORMAL)
       draw.time = () => {
-        let h = S.time.getHours()
-        const fh = safe(() => S.time.getFormatHour())
-        if (typeof fh === 'number' && fh >= 0) h = fh
+        const H = S.time.getHours()
+        const h12 = is12h()
+        const h = h12 ? H % 12 || 12 : H
         const text = pad2(h) + pad2(S.time.getMinutes())
+        const one = h12 && h < 10
         rows.forEach((r) => {
-          for (let i = 0; i < 4; i++) setSrc(r.cells[i], img(r.folder + '/' + text[i] + '.png'))
+          const dx = (one ? r.a.shift : 0) + (h12 && r.a.ampm_shift ? r.a.ampm_shift : 0)
+          for (let i = 0; i < 4; i++) place(r.cells[i], r.a.x[i] + dx, r.a.y, img(r.folder + '/' + text[i] + '.png'))
+          show(r.cells[0], !one)
+          place(r.colon, r.a.colon + dx, r.a.y)
+          place(r.ampm, r.a.ampm[0] + dx, r.a.ampm[1], img(H < 12 ? 'sm/am.png' : 'sm/pm.png'))
+          show(r.ampm, h12)
+          if (r.folder === 'time') {
+            place(s1, t.sec.x[0] + dx, t.sec.y)
+            place(s2, t.sec.x[1] + dx, t.sec.y)
+          }
         })
       }
       draw.time()
-      const s1 = makeImg(t.sec.x[0], t.sec.y, img('sec/0.png'), NORMAL)
-      const s2 = makeImg(t.sec.x[1], t.sec.y, img('sec/0.png'), NORMAL)
       let lastMin = -1
       draw.secs = () => {
         const s = pad2(S.time.getSeconds())
@@ -800,6 +840,7 @@ WatchFace({
         }
       }
       draw.secs()
+      sources.push('clock=' + (is12h() ? '12h' : '24h'))
       if (L.review) {
         // review mode: tap the time for the next photo, shown with the weather chosen for it
         tapApp('time', null, null, null, () => {
@@ -808,6 +849,21 @@ WatchFace({
           fxFlashSoon()
         })
       } else tapApp('time', null, ['SYSTEM_APP_COUNTDOWN', 'SYSTEM_APP_ALARM']) // tap the time: open the Timer
+    })
+
+    // -- system status (left of the hours): the watch shows each icon only while it's on --------
+    step('status', () => {
+      const SST = ui.system_status || (typeof hmUI !== 'undefined' && hmUI && hmUI.system_status) || {}
+      const types = { bt: SST.DISCONNECT, dnd: SST.DISTURB, lock: SST.LOCK }
+      const made = []
+      if (W.IMG_STATUS !== undefined) {
+        L.status.forEach((s) => {
+          if (types[s[0]] === undefined) return
+          const ok = safe(() => ui.createWidget(W.IMG_STATUS, lvl({ x: s[1], y: s[2], type: types[s[0]], src: img('icon/st_' + s[0] + '.png') }, NORMAL)))
+          if (ok) made.push(s[0])
+        })
+      }
+      sources.push('status=' + (made.length ? 'sys:' + made.join('+') : 'none'))
     })
 
     // -- ring gauges: steps (JS) and HybridCharge (system) ----------------------------------------
@@ -877,7 +933,7 @@ WatchFace({
 
     // -- next sun event: sunrise until it's up, then sunset until it's down ------------------------
     step('sun', () => {
-      const s = L.sun
+      const s = dateNames().sun
       const icon = makeImg(s.icon[0], s.icon[1], img('icon/sunrise.png'), NORMAL)
       // the watch's own times if it offers both (one shown at a time), otherwise ours
       const riseSys = sysField('sunrise', ['SUN_RISE', 'SUNRISE'], s.box, 'sm', { dot: 'colon' })
@@ -953,11 +1009,14 @@ WatchFace({
       const run = makeRun('sm', 4, b.y, NORMAL)
       draw.batt = () => {
         const v = S.batt.getCurrent()
-        const keys = typeof v === 'number' && v >= 0 ? toKeys(v + '%') : ['none']
+        const ok = typeof v === 'number' && v >= 0
+        const keys = ok ? toKeys(v + '%') : ['none']
+        // low battery: icon and value in the warning colour ('bw': the same glyphs in red)
+        const low = ok && v <= b.low
         const total = b.icon_w + 3 + measure('sm', keys)
         const x = b.cx - total / 2
-        place(icon, x, b.icon_y)
-        run.draw(keys, x + b.icon_w + 3)
+        place(icon, x, b.icon_y, img(low ? 'icon/batt_low.png' : 'icon/batt.png'))
+        run.draw(keys, x + b.icon_w + 3, low ? 'bw' : 'sm')
       }
       draw.batt()
       tapApp('battery', ['BATTERY'], null)

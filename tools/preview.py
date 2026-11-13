@@ -11,6 +11,8 @@ SAMPLE = {
     "steps": 8670, "goal": 10000, "hr": 86, "charge": 72,
     "rise": "07:54", "set": "18:02", "recovery": "18", "sleep": "82", "batt": 75,
     "vo2": "48", "hrv": "46",
+    "h12": False,     # 12-hour clock: no leading zero, AM/PM
+    "status": (),     # active system statuses to show: "bt", "dnd", "lock"
 }
 
 
@@ -49,12 +51,14 @@ def hexrgb(v):
 
 
 def date_row(f, L, s, key="date"):
-    d = L[key]
-    f.put("sm/wk%d.png" % (s["wd"] - 1), *d["wk"])
+    """Weekday, day and month in the sample's language (s["lang"], English by default)."""
+    names = L["dates"].get(s.get("lang", "en"), L["dates"]["en"])
+    d = names[key]
+    f.put("sm/%s.png" % names["wk"][s["wd"] - 1], *d["wk"])
     dd = "%02d" % s["day"]
     f.put("sm/%s.png" % dd[0], *d["dd"])
     f.put("sm/%s.png" % dd[1], d["dd"][0] + L["g"]["sm"]["w"]["0"], d["dd"][1])
-    f.put("sm/mo%d.png" % (s["month"] - 1), *d["mo"])
+    f.put("sm/%s.png" % names["mo"][s["month"] - 1], *d["mo"])
 
 
 def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=0):
@@ -97,16 +101,17 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=0):
     # next sun event: sunset during the day, sunrise otherwise
     hm = lambda v: int(v[:2]) * 60 + int(v[3:])
     sunset = hm(s["rise"]) <= s["h"] * 60 + s["m"] < hm(s["set"])
-    f.item(L["sun"], "sunset" if sunset else "sunrise", s["set"] if sunset else s["rise"])
+    sun = L["dates"].get(s.get("lang", "en"), L["dates"]["en"])["sun"]
+    f.item(sun, "sunset" if sunset else "sunrise", s["set"] if sunset else s["rise"])
 
     t = L["time"]
-    digits = "%02d%02d" % (s["h"], s["m"])
-    for i in range(4):
-        f.put("time/%s.png" % digits[i], t["x"][i], t["y"])
-    f.put("time/colon.png", t["colon"], t["y"])
+    dx = time_row(f, L, s, "time")
     ss = "%02d" % s["s"]
     for i in range(2):
-        f.put("sec/%s.png" % ss[i], t["sec"]["x"][i], t["sec"]["y"])
+        f.put("sec/%s.png" % ss[i], t["sec"]["x"][i] + dx, t["sec"]["y"])
+    for k, x, y in L["status"]:
+        if k in s.get("status", ()):
+            f.put("icon/st_%s.png" % k, x, y)
 
     gc = L["gauge_colors"]
     st = s["steps"]
@@ -141,19 +146,34 @@ def render(root, L, tod="dusk", pick=0, s=SAMPLE, frame=1, bg=None, flash=0):
     keys = [KEYS.get(ch, ch) for ch in text]
     total = bt["icon_w"] + 3 + sum(g["w"][k] for k in keys)
     x = bt["cx"] - total / 2
-    f.put("icon/batt.png", round(x), bt["icon_y"])
-    f.run("sm", text, {"x": round(x + bt["icon_w"] + 3), "y": bt["y"], "w": 0})
+    low = s["batt"] <= bt.get("low", -1)
+    f.put("icon/batt_low.png" if low else "icon/batt.png", round(x), bt["icon_y"])
+    f.run("bw" if low else "sm", text, {"x": round(x + bt["icon_w"] + 3), "y": bt["y"], "w": 0})
     return finish(f.im)
+
+
+def time_row(f, L, s, key):
+    """HH:MM as the face draws it (key "time" or "aod"): in 12-hour mode without a leading
+    zero (the row moves to stay centred) and with AM/PM. Returns the row's x offset."""
+    t = L[key]
+    h = s["h"] % 12 or 12 if s.get("h12") else s["h"]
+    digits = "%02d%02d" % (h, s["m"])
+    one = s.get("h12") and h < 10
+    dx = (t["shift"] if one else 0) + (t.get("ampm_shift", 0) if s.get("h12") else 0)
+    folder = "time" if key == "time" else "aod"
+    for i in range(4):
+        if i or not one:
+            f.put("%s/%s.png" % (folder, digits[i]), t["x"][i] + dx, t["y"])
+    f.put("%s/colon.png" % folder, t["colon"] + dx, t["y"])
+    if s.get("h12"):
+        f.put("sm/%s.png" % ("am" if s["h"] < 12 else "pm"), t["ampm"][0] + dx, t["ampm"][1])
+    return dx
 
 
 def render_aod(root, L, s=SAMPLE):
     f = Face(root, L)
-    a = L["aod"]
-    digits = "%02d%02d" % (s["h"], s["m"])
-    for i in range(4):
-        f.put("aod/%s.png" % digits[i], a["x"][i], a["y"])
-    f.put("aod/colon.png", a["colon"], a["y"])
-    date_row(f, L, s, "date_aod")
+    time_row(f, L, s, "aod")
+    date_row(f, L, s, "aod")
     return finish(f.im)
 
 

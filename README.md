@@ -29,14 +29,25 @@ City + data face.
 - Compass bezel: the ring turns so N points north, with N/E/S/W kept upright (only while
   the screen is on).
 - Weather (condition, temperature, wind, humidity) and altitude, the date with the next
-  sunrise or sunset, HH:MM with seconds.
+  sunrise or sunset, HH:MM with seconds. The clock follows the watch's 12/24-hour setting:
+  in 12-hour mode the hour has no leading zero (the time stays centred) and AM/PM shows
+  above the seconds (in always-on, right of the minutes).
+- Status icons left of the hours, shown by the watch only while that status is on:
+  Bluetooth disconnected (red), Do Not Disturb and screen lock.
 - Ring gauges for steps (16.3k above 9,999) and HybridCharge, heart rate, recovery time,
   sleep score, VO2max, HRV, battery. Values are white, coral is the only text accent, and
-  the metric colours are kept to the rings and icons (no text captions).
+  the metric colours are kept to the rings and icons (no text captions). The battery turns
+  red at `BATTERY_LOW` % (20) or below.
+- Weekday and month names follow the watch's language: English, Spanish, Catalan, French,
+  German, Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Romanian,
+  Hungarian, Indonesian and Malay (`DATE_NAMES` in `tools/gen_assets.py`). Other languages
+  show English; the generator leaves out any language whose letters the bundled font lacks.
 - Taps: weather, altitude, steps, HybridCharge, heart rate, sun times, sleep and battery open the matching watch app (IMG_CLICK areas, if the firmware offers them).
   The time opens the Timer (or Alarms). HRV opens HybridCharge, as there is no HRV screen to
   open and HRV is one of HybridCharge's inputs (it replaced Readiness on current firmware).
 - Always-on: outlined time and the date on black (about 2% of pixels lit; Zepp's limit is 10%).
+- The top and bottom centre are left free for the watch's own indicators, as Zepp's design
+  guidelines ask: the bottom row is VO2max · battery · HRV, above the bottom centre.
 
 `meridian/preview/normal.png`, `variants.png`, `aod.png` and `weather.gif` are rendered from
 the real assets (the GIF over the generated skylines, never over your photos).

@@ -377,3 +377,48 @@ def ring(radius, width, color, alpha):
     im = Image.new("RGBA", (s, s), color + (0,))
     im.putalpha(m)
     return im.resize((size, size), Image.LANCZOS)
+
+
+# ---------------------------------------------------------------- status icons --
+def bluetooth_off(size, color):
+    """Bluetooth rune with a small cross at its lower right: the phone is disconnected."""
+    c = Canvas(size)
+    m = c.layer()
+    d = ImageDraw.Draw(m)
+    w = 0.09
+    # upper left -> lower right point -> bottom of the spine -> top -> upper right point -> lower left
+    pts = [(0.14, 0.30), (0.52, 0.64), (0.33, 0.86), (0.33, 0.14), (0.52, 0.36), (0.14, 0.70)]
+    for a, b in zip(pts, pts[1:]):
+        _line(d, c, [a, b], w)
+    for a, b in (((0.68, 0.62), (0.94, 0.88)), ((0.94, 0.62), (0.68, 0.88))):
+        _line(d, c, [a, b], w * 1.1)
+    c.add(m, color)
+    return c.done()
+
+
+def dnd(size, color):
+    """Plain crescent moon: Do Not Disturb (the sleep icon has a star and another colour)."""
+    c = Canvas(size)
+    m = c.layer()
+    _ell(ImageDraw.Draw(m), c, 0.10, 0.10, 0.86, 0.86)
+    cut = c.layer()
+    _ell(ImageDraw.Draw(cut), c, 0.34, -0.02, 1.06, 0.70)
+    c.add(ImageChops.subtract(m, cut), color)
+    return c.done()
+
+
+def lock(size, color):
+    """Padlock: the screen is locked."""
+    c = Canvas(size)
+    m = c.layer()
+    d = ImageDraw.Draw(m)
+    d.arc([c.p(0.28, 0.08), c.p(0.72, 0.62)], 180, 360, fill=255, width=int(0.10 * c.s))
+    d.line([c.p(0.28, 0.35), c.p(0.28, 0.50)], fill=255, width=int(0.10 * c.s))
+    d.line([c.p(0.72, 0.35), c.p(0.72, 0.50)], fill=255, width=int(0.10 * c.s))
+    d.rounded_rectangle([c.p(0.16, 0.44), c.p(0.84, 0.94)], radius=int(0.10 * c.s), fill=255)
+    hole = c.layer()
+    hd = ImageDraw.Draw(hole)
+    _ell(hd, c, 0.43, 0.56, 0.57, 0.70)
+    hd.rectangle([c.p(0.47, 0.62), c.p(0.53, 0.80)], fill=255)
+    c.add(ImageChops.subtract(m, hole), color)
+    return c.done()

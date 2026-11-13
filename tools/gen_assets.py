@@ -49,6 +49,7 @@ PHOTO_VIGNETTE = 0.45           # 0..1: darkening at the screen edge, behind the
 PHOTO_16BIT = True
 BEZEL_R = 206                   # compass bezel: radius of the N/E/S/W letter centres
 RING_TRACK_ALPHA = 70           # 0..255: opacity of the ring gauges' track (in the ring's colour)
+BATTERY_LOW = 20                # at or below this %, the battery shows in the warning colour
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -136,10 +137,34 @@ COLORS = {
     "bezel": (215, 215, 215),
     "north": (255, 80, 70),
     "aod": (255, 255, 255),
+    "warning": (255, 78, 66),    # low battery
 }
 
-WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]   # Zepp: 1 = Monday
-MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+# Weekday (Monday first) and month abbreviations per language, uppercase, as the face
+# shows them. The face picks the watch's language (Zepp language codes in ZEPP_LANGS);
+# languages missing here, or needing letters the bundled font lacks (e.g. Polish, Czech,
+# Turkish, or non-Latin scripts), show English.
+DATE_NAMES = {
+    "en": ("MON TUE WED THU FRI SAT SUN", "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC"),
+    "es": ("LUN MAR MIÉ JUE VIE SÁB DOM", "ENE FEB MAR ABR MAY JUN JUL AGO SEP OCT NOV DIC"),
+    "ca": ("DL DT DC DJ DV DS DG", "GEN FEBR MARÇ ABR MAIG JUNY JUL AG SET OCT NOV DES"),
+    "fr": ("LUN MAR MER JEU VEN SAM DIM", "JANV FÉVR MARS AVR MAI JUIN JUIL AOÛT SEPT OCT NOV DÉC"),
+    "de": ("MO DI MI DO FR SA SO", "JAN FEB MÄR APR MAI JUN JUL AUG SEP OKT NOV DEZ"),
+    "it": ("LUN MAR MER GIO VEN SAB DOM", "GEN FEB MAR APR MAG GIU LUG AGO SET OTT NOV DIC"),
+    "pt": ("SEG TER QUA QUI SEX SÁB DOM", "JAN FEV MAR ABR MAI JUN JUL AGO SET OUT NOV DEZ"),
+    "nl": ("MA DI WO DO VR ZA ZO", "JAN FEB MRT APR MEI JUN JUL AUG SEP OKT NOV DEC"),
+    "sv": ("MÅN TIS ONS TORS FRE LÖR SÖN", "JAN FEB MARS APR MAJ JUNI JULI AUG SEP OKT NOV DEC"),
+    "da": ("MAN TIRS ONS TORS FRE LØR SØN", "JAN FEB MAR APR MAJ JUN JUL AUG SEP OKT NOV DEC"),
+    "nb": ("MAN TIR ONS TOR FRE LØR SØN", "JAN FEB MAR APR MAI JUN JUL AUG SEP OKT NOV DES"),
+    "fi": ("MA TI KE TO PE LA SU", "TAMMI HELMI MAALIS HUHTI TOUKO KESÄ HEINÄ ELO SYYS LOKA MARRAS JOULU"),
+    "ro": ("LUN MAR MIE JOI VIN SÂM DUM", "IAN FEB MAR APR MAI IUN IUL AUG SEPT OCT NOI DEC"),
+    "hu": ("H K SZE CS P SZO V", "JAN FEBR MÁRC ÁPR MÁJ JÚN JÚL AUG SZEPT OKT NOV DEC"),
+    "id": ("SEN SEL RAB KAM JUM SAB MIN", "JAN FEB MAR APR MEI JUN JUL AGU SEP OKT NOV DES"),
+    "ms": ("ISN SEL RAB KHA JUM SAB AHD", "JAN FEB MAC APR MEI JUN JUL OGO SEP OKT NOV DIS"),
+}
+# Zepp OS language codes (getLanguage(), see the Zepp docs' language list) -> DATE_NAMES key
+ZEPP_LANGS = {2: "en", 3: "es", 6: "fr", 7: "de", 8: "id", 10: "it", 15: "pt", 16: "nl", 20: "pt",
+              21: "ro", 25: "ca", 26: "fi", 27: "nb", 28: "da", 29: "sv", 30: "hu", 31: "ms"}
 
 # glyph keys -> characters (file names avoid punctuation)
 PUNCT = {"minus": "-", "dot": ".", "colon": ":", "slash": "/", "pct": "%", "deg": "°"}
@@ -153,6 +178,7 @@ SETS = {
     "num": (600, 38, COLORS["text"], True, False, True),     # heart rate, recovery, sleep
     "gn": (600, 28, COLORS["text"], True, False, True),      # numbers inside rings
     "sm": (600, 26, COLORS["text"], True, False, True),      # weather, date, sun, VO2max, HRV, battery
+    "bw": (600, 26, COLORS["warning"], True, False, True),   # the battery when low (same metrics as sm)
 }
 
 
@@ -471,12 +497,28 @@ def main():
         g.build(extras=extras)
         sets[name] = g
     sm = sets["sm"]
-    wk_w = max(int(math.ceil(sm.f.getlength(w) + 2 * (len(w) - 1))) for w in WEEKDAYS) + 2 * sm.pad
-    mo_w = max(int(math.ceil(sm.f.getlength(m) + 2 * (len(m) - 1))) for m in MONTHS) + 2 * sm.pad
-    for i, w in enumerate(WEEKDAYS):
-        sm.word("wk%d" % i, w, COLORS["accent"], wk_w, "r", 2)
-    for i, m in enumerate(MONTHS):
-        sm.word("mo%d" % i, m, COLORS["date"], mo_w, "l", 2)
+    # weekday and month names for each language the font can draw: weekdays in boxes as
+    # wide as the language's widest one, right-aligned against the day; months left-aligned
+    notdef = sm.f.getmask("\u4e00")                      # what a letter the font lacks looks like
+    lacks = lambda ch: (sm.f.getmask(ch).size, bytes(sm.f.getmask(ch))) == (notdef.size, bytes(notdef))
+    word_w = lambda t: int(math.ceil(sm.f.getlength(t) + 2 * (len(t) - 1))) + 2 * sm.pad
+    date_langs = {}
+    for lang, (wks, mos) in DATE_NAMES.items():
+        wks, mos = wks.split(), mos.split()
+        assert len(wks) == 7 and len(mos) == 12, lang
+        missing = sorted({ch for t in wks + mos for ch in t if lacks(ch)})
+        if missing:
+            print("date names: %s left out, the font lacks %s (English instead)" % (lang, "".join(missing)))
+            continue
+        wk_w, mo_w = max(map(word_w, wks)), max(map(word_w, mos))
+        for i, w in enumerate(wks):
+            sm.word("wk_%s_%d" % (lang, i), w, COLORS["accent"], wk_w, "r", 2)
+        for i, m in enumerate(mos):
+            sm.word("mo_%s_%d" % (lang, i), m, COLORS["date"], mo_w, "l", 2)
+        date_langs[lang] = (wk_w, mo_w)
+    # 12-hour clock: AM / PM, in the accent colour like the seconds
+    for k in ("am", "pm"):
+        sm.word(k, k.upper(), COLORS["seconds"], None, "l", 1)
     for name, g in sets.items():
         g.save(rel(name))
 
@@ -497,6 +539,11 @@ def main():
         "vo2": (icons.lungs, 22, COLORS["vo2"]),
         "hrv": (icons.hrv, 22, COLORS["hrv"]),
         "batt": (icons.bolt, 16, COLORS["steps"]),
+        "batt_low": (icons.bolt, 16, COLORS["warning"]),
+        # system status, shown by the watch only while on (left of the hours)
+        "st_bt": (icons.bluetooth_off, 18, COLORS["warning"]),
+        "st_dnd": (icons.dnd, 18, COLORS["bezel"]),
+        "st_lock": (icons.lock, 18, COLORS["bezel"]),
     }
     isize = {"weather": (26, 26)}
     for k, (fn, s, col) in icon_specs.items():
@@ -565,25 +612,28 @@ def main():
     L["weather"].update(centred_row(90, [("hum", "drop", text_w("sm", "100%")),
                                          ("alt", "alt", text_w("sm", "1234", ["u_m"]))]))
 
-    # date row: WED 11 NOV, then the next sun event (sunrise or sunset) with its icon
+    # date row: WED 11 NOV, then the next sun event (sunrise or sunset) with its icon. Laid
+    # out per language, centred for its widest names, so the sun event never overlaps a month.
+    # Always-on shows the date without the sun event: the same row, centred on its own.
     dy = 120
     dd_w = 2 * g["sm"]["w"]["0"] + 2 * g["sm"]["pad"]
-    gap = 6 - 2 * sm.pad
-    wk_vis = sm.f.getlength("WED") + 4          # a typical weekday as drawn (2 px tracking)
-    mo_vis = sm.f.getlength("NOV") + 4
-    date_vis = wk_vis + 6 + 2 * g["sm"]["w"]["0"] + 6 + mo_vis
+    gap = 6                                      # px between weekday, day and month
     sun_box = text_w("sm", "18:00")
-    total = date_vis + 18 + isize["sunrise"][0] + 3 + sun_box
-    x0 = CX - total / 2
-    # weekday box is right-aligned, so its visible text ends at the box's right edge
-    wk_x = x0 + wk_vis - wk_w + sm.pad
-    dd_x = wk_x + wk_w + gap
-    mo_x = dd_x + dd_w + gap
-    L["date"] = {"wk": [int(wk_x), row(dy, "sm")], "dd": [int(dd_x), row(dy, "sm")], "mo": [int(mo_x), row(dy, "sm")]}
-    # always-on shows the date without the sun event: the same row, centred on its own
-    shift = (CX - date_vis / 2) - x0
-    L["date_aod"] = {k: [int(round(v[0] + shift)), v[1]] for k, v in L["date"].items()}
-    L["sun"] = item(x0 + date_vis + 18, dy, "sunrise", sun_box, "sm", gap=3)
+    L["dates"] = {}
+    for lang, (wk_w, mo_w) in date_langs.items():
+        date_vis = (wk_w - 2 * sm.pad) + gap + 2 * g["sm"]["w"]["0"] + gap + (mo_w - 2 * sm.pad)
+        x0 = CX - (date_vis + 18 + isize["sunrise"][0] + 3 + sun_box) / 2
+        wk_x = x0 - sm.pad                       # the box is right-aligned: the widest name starts at x0
+        dd_x = wk_x + wk_w - 2 * sm.pad + gap    # images carry `pad` px of margin on each side
+        mo_x = dd_x + dd_w - 2 * sm.pad + gap
+        date = {"wk": [int(round(wk_x)), row(dy, "sm")], "dd": [int(round(dd_x)), row(dy, "sm")],
+                "mo": [int(round(mo_x)), row(dy, "sm")]}
+        shift = (CX - date_vis / 2) - x0
+        L["dates"][lang] = {"wk": ["wk_%s_%d" % (lang, i) for i in range(7)],
+                            "mo": ["mo_%s_%d" % (lang, i) for i in range(12)],
+                            "date": date, "aod": {k: [int(round(v[0] + shift)), v[1]] for k, v in date.items()},
+                            "sun": item(x0 + date_vis + 18, dy, "sunrise", sun_box, "sm", gap=3)}
+    L["langs"] = {str(code): lang for code, lang in ZEPP_LANGS.items() if lang in L["dates"]}
 
     # time HH:MM + seconds (baseline-aligned, smaller, accent colour)
     tg, sg = g["time"], g["sec"]
@@ -601,6 +651,24 @@ def main():
     total_a = 4 * tw_d + tw_c
     ax = CX - total_a // 2 - tg["pad"]
     L["aod"] = {"x": [ax, ax + tw_d, ax + 2 * tw_d + tw_c, ax + 3 * tw_d + tw_c], "colon": ax + 2 * tw_d + 3, "y": ty}
+    # 12-hour clock: AM/PM top-aligned with the digits, above the seconds (always-on: where
+    # the seconds would be). A one-digit hour drops its leading zero and the row moves left
+    # by half a digit, so the time stays centred.
+    cap_top = lambda s, ch: sets[s].baseline + sets[s].f.getbbox(ch, anchor="ls")[1]
+    ampm_y = int(round(ty + cap_top("time", "0") - cap_top("sm", "A")))
+    for key, x0 in (("time", tx), ("aod", ax)):
+        L[key]["ampm"] = [int(round(x0 + 4 * tw_d + tw_c + 6 + tg["pad"] - sm.pad)), ampm_y]
+        L[key]["shift"] = -int(round(tw_d / 2))
+    # always-on has no seconds, so AM/PM widens the row: the row moves left to stay centred
+    ampm_w = max(g["sm"]["w"]["am"], g["sm"]["w"]["pm"])
+    L["aod"]["ampm_shift"] = -int(round((6 + ampm_w) / 2))
+    # status icons (Bluetooth lost, Do Not Disturb, screen lock): a column left of the hours,
+    # mirroring the seconds on the right; each shows only while that status is on
+    sw = isize["st_bt"][0]
+    st_x = tx + tg["pad"] - 6 - sw
+    st_h = 3 * sw + 2 * 6
+    st_y0 = int(round(176 - st_h / 2))
+    L["status"] = [[k, int(st_x), st_y0 + i * (sw + 6)] for i, k in enumerate(("bt", "dnd", "lock"))]
 
     # stats: ring gauges (steps, HybridCharge) and heart rate in the middle; no captions,
     # the icons and ring colours say what each one is
@@ -628,18 +696,21 @@ def main():
         iw, ih = isize[k]
         L["health"][k] = {"cx": cx, "icon_w": iw, "icon_y": hy - ih // 2, "y": row(hy, "num"),
                           "tap": [cx - 60, hy - 22, 120, 44]}
-    # VO2max and HRV: icon + value (HRV may be drawn by the watch, so its box is fixed)
-    fy = 390
+    # VO2max, battery and HRV in one row, the battery in the middle: the bottom centre stays
+    # free for the watch's own indicators (offline voice prompt), as Zepp's guidelines ask.
+    # VO2max and HRV keep fixed boxes (the watch may draw HRV itself); the battery is centred.
+    fy = 386
+    side = 46                                    # VO2max ends / HRV starts this far from the centre
     L["fitness"] = {}
-    for k, cx, sample in (("vo2", CX - 60, "48"), ("hrv", CX + 60, "96")):
+    for k, sample in (("vo2", "48"), ("hrv", "96")):
         iw, ih = isize[k]
         units = ["u_ms"] if k == "hrv" else []
-        x = cx - (iw + 5 + text_w("sm", sample, units)) / 2
+        x = CX - side - (iw + 5 + text_w("sm", sample, units)) if k == "vo2" else CX + side
         L["fitness"][k] = {"icon": [int(round(x)), fy - ih // 2],
                            "box": {"x": int(round(x + iw + 5)), "y": row(fy, "sm"),
                                    "w": text_w("sm", "100", units) + 4, "h": g["sm"]["h"]}}
-    by = 418
-    L["batt"] = {"y": row(by, "sm"), "icon_y": by - isize["batt"][1] // 2, "icon_w": isize["batt"][0], "cx": CX}
+    L["batt"] = {"y": row(fy, "sm"), "icon_y": fy - isize["batt"][1] // 2, "icon_w": isize["batt"][0], "cx": CX,
+                 "low": BATTERY_LOW}
 
     # tap areas (transparent images sized to each area)
     tw_all = L["time"]["sec"]["x"][1] + g["sec"]["w"]["0"] + 2 * g["sec"]["pad"] - L["time"]["x"][0]
@@ -654,9 +725,9 @@ def main():
         "charge": [L["gauges"]["charge"]["cx"] - 48, gy - 48, 96, 96],
         "recovery": hl["recovery"]["tap"],
         "sleep": hl["sleep"]["tap"],
-        "vo2": [CX - 124, fy - 15, 120, 30],
-        "hrv": [CX + 4, fy - 15, 120, 30],
-        "battery": [CX - 44, by - 14, 88, 28],
+        "vo2": [CX - side - 66, fy - 16, 66, 26],
+        "battery": [CX - side, fy - 16, 2 * side, 26],
+        "hrv": [CX + side, fy - 16, 80, 26],
     }
     L["taps"] = {k: [int(v) for v in r] for k, r in taps.items()}
     save(Image.new("RGBA", (W, H), (0, 0, 0, 0)), rel("tap/debug.png"))
